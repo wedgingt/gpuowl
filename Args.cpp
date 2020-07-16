@@ -23,8 +23,11 @@ string Args::mergeArgs(int argc, char **argv) {
   return ret;
 }
 
-vector<pair<string, string>> splitArgLine(const string& line) {
+vector<pair<string, string>> splitArgLine(const string& inputLine) {
   vector<pair<string, string>> ret;
+
+  // The line must be ended with at least one space for the regex to function correctly.
+  string line = inputLine + ' ';
   std::regex rx("\\s*(-+\\w+)\\s+([^-]\\S*)?\\s*([^-]*)");
   for (std::sregex_iterator it(line.begin(), line.end(), rx); it != std::sregex_iterator(); ++it) {
     smatch m = *it;
@@ -62,7 +65,7 @@ void Args::printHelp() {
 -pm1 <exponent>    : run a single P-1 test and exit, ignoring worktodo.txt
 -ll <exponent>     : run a single LL test and exit, ignoring worktodo.txt
 -verify <file>|<exponent> : verify PRP-proof contained in <file> or in the folder <exponent>/
--proof [<power>]   : enable PRP proof generation. Default <power> is 9.
+-proof [<power>]   : enable PRP proof generation. Default <power> is 8. Use 8 - 10.
 -results <file>    : name of results file, default 'results.txt'
 -iters <N>         : run next PRP test for <N> iterations and exit. Multiple of 10000.
 -maxAlloc          : limit GPU memory usage to this value in MB (needed on non-AMD GPUs)
@@ -116,9 +119,12 @@ static int getSeqId(const std::string& uid) {
 void Args::parse(string line) {  
   auto args = splitArgLine(line);
   for (const auto& [key, s] : args) {
+    // log("key '%s'\n", key.c_str());
     if (key == "-h" || key == "--help") { printHelp(); throw "help"; }
-    else if (key == "-proof") { proofPow = s.empty() ? 9 : stoi(s); }
-    else if (key == "-verify") {
+    else if (key == "-proof") {
+      proofPow = s.empty() ? 8 : stoi(s);
+      // log("proof power %d\n", proofPow);
+    } else if (key == "-verify") {
       if (s.empty()) {
         log("-verify needs <proof-file> or <exponent>\n");
         throw "-verify without proof-file";
@@ -138,7 +144,6 @@ void Args::parse(string line) {
     else if (key == "-B2") { B2 = stoi(s); }
     else if (key == "-rB2") { B2_B1_ratio = stoi(s); }
     else if (key == "-fft") { fftSpec = s; }
-      // fftSize = stoi(s) * ((s.back() == 'K') ? 1024 : ((s.back() == 'M') ? 1024 * 1024 : 1)); }
     else if (key == "-dump") { dump = s; }
     else if (key == "-user") { user = s; }
     else if (key == "-cpu") { cpu = s; }
