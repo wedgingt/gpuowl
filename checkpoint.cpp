@@ -4,7 +4,7 @@
 #include "File.h"
 #include "Blake2.h"
 
-#include <filesystem>
+#include <experimental/filesystem>
 #include <ios>
 #include <cassert>
 #include <cinttypes>
@@ -13,20 +13,20 @@ namespace fs = std::filesystem;
 
 namespace {
 
-fs::path fileName(u32 E, u32 k, const string& suffix, const string& extension) {
+  experimental::filesystem::path fileName(u32 E, u32 k, const string& suffix, const string& extension) {
   string sE = to_string(E);
-  auto baseDir = fs::current_path() / sE;
-  if (!fs::exists(baseDir)) { fs::create_directory(baseDir); }
+  auto baseDir = experimental::filesystem::current_path() / sE;
+  if (!experimental::filesystem::exists(baseDir)) { experimental::filesystem::create_directory(baseDir); }
   return baseDir / (to_string(k) + suffix + '.' + extension);
 }
 
 void cleanup(u32 E, const string& ext) {
   error_code noThrow;
-  fs::remove(fileName(E, E, "", ext), noThrow);
-  fs::remove(fileName(E, E, "-old", ext), noThrow);
-  
+  experimental::filesystem::remove(fileName(E, E, "", ext), noThrow);
+  experimental::filesystem::remove(fileName(E, E, "-old", ext), noThrow);
+
   // attempt delete the exponent folder in case it is now empty
-  fs::remove(fs::current_path() / to_string(E), noThrow);
+  experimental::filesystem::remove(experimental::filesystem::current_path() / to_string(E), noThrow);
 }
 
 u32 nWords(u32 E) { return (E - 1) / 32 + 1; }
@@ -56,22 +56,22 @@ static vector<u32> makeVect(u32 size, u32 elem0) {
 }
 
 void StateLoader::save(u32 E, const std::string& extension, u32 k) {
-  fs::path newFile = fileName(E, E, "-new", extension);
+ experimental::filesystem::path newFile = fileName(E, E, "-new", extension);
   doSave(File::openWrite(newFile).get());
-  
-  fs::path saveFile = fileName(E, E, "", extension);
-  fs::path oldFile = fileName(E, E, "-old", extension);
+
+  experimental::filesystem::path saveFile = fileName(E, E, "", extension);
+  experimental::filesystem::path oldFile = fileName(E, E, "-old", extension);
   error_code noThrow;
-  fs::remove(oldFile, noThrow);
-  fs::rename(saveFile, oldFile, noThrow);
-  fs::rename(newFile, saveFile);
+  experimental::filesystem::remove(oldFile, noThrow);
+  experimental::filesystem::rename(saveFile, oldFile, noThrow);
+  experimental::filesystem::rename(newFile, saveFile);
 
   if (k) {
-    fs::path persistFile = fileName(E, k, "", extension);
-    fs::remove(persistFile, noThrow);    
-    fs::copy_file(saveFile, persistFile, fs::copy_options::overwrite_existing);
+   experimental::filesystem::path persistFile = fileName(E, k, "", extension);
+   experimental::filesystem::remove(persistFile, noThrow);
+   experimental::filesystem::copy_file(saveFile, persistFile, experimental::filesystem::copy_options::overwrite_existing);
   }
-  
+
   // log("'%s' saved at %u\n", saveFile.string().c_str(), getK());
 }
 
@@ -90,7 +90,7 @@ bool StateLoader::load(u32 E, const std::string& extension) {
       // log("'%s' not found\n", path.string().c_str());
     }
   }
-  
+
   if (foundFiles) {
     throw("invalid savefiles found, investigate why\n");
   }
@@ -101,7 +101,7 @@ bool StateLoader::load(u32 E, const std::string& extension) {
 // --- LL ---
 
 LLState::LLState(u32 E) : E{E} {
-  if (!load(E, EXT)) {  
+  if (!load(E, EXT)) {
     k = 0;
     data = makeVect(nWords(E), 4);
   }
@@ -140,7 +140,7 @@ void LLState::doSave(FILE* fo) {
 // --- PRP ---
 
 PRPState::PRPState(u32 E, u32 iniBlockSize) : E{E} {
-  if (!load(E, EXT)) {  
+  if (!load(E, EXT)) {
     // log("starting from the beginning\n");
     k = 0;
     blockSize = iniBlockSize;
@@ -169,7 +169,7 @@ void PRPState::doSave(FILE* fo) {
 // --- P1 ---
 
 P1State::P1State(u32 E, u32 B1) : E{E}, B1{B1} {
-  if (!load(E, EXT)) {  
+  if (!load(E, EXT)) {
     // log("%u P1 starting from the beginning.\n", E);
     k = 0;
     nBits = 0;
@@ -200,7 +200,7 @@ void P1State::doSave(FILE* fo) {
 // --- P2 ---
 
 P2State::P2State(u32 E, u32 B1, u32 B2) : E{E}, B1{B1}, B2{B2} {
-  if (!load(E, EXT)) {  
+  if (!load(E, EXT)) {
     // log("%u P2 starting from the beginning.\n", E);
     k = 0;
     raw.clear();
@@ -217,7 +217,7 @@ bool P2State::doLoad(const char* headerLine, FILE *fi) {
     assert(k > 0 && k < 2880);
     if (B1 != fileB1 || B2 != fileB2) {
       log("%u P2 want B1=%u,B2=%u but savefile has B1=%u,B2=%u. Fix B1,B2 or move savefile\n", E, B1, B2, fileB1, fileB2);
-    } else {    
+    } else {
       return read(fi, nWords, &raw);
     }
   }

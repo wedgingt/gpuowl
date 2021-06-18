@@ -121,11 +121,11 @@ void Task::adjustBounds(Args& args) {
 
 void Task::execute(const Args& args, Background& background, std::atomic<u32>& factorFoundForExp) {
   if (kind == VERIFY) {
-    fs::path path{verifyPath};
-    if (fs::status(path).type() == fs::file_type::directory) {
-      for (auto& entry : fs::directory_iterator(path)) {
+    experimental::filesystem::path path{verifyPath};
+    if (experimental::filesystem::status(path).type() == experimental::filesystem::file_type::directory) {
+      for (auto& entry : experimental::filesystem::directory_iterator(path)) {
         log("- %s\n", entry.path().string().c_str());
-        if (entry.is_regular_file() && entry.path().extension().string() == ".proof"s) {
+        if (is_regular_file(entry.status()) && entry.path().extension().string() == ".proof"s) {
           path = entry.path();
           break;
         }
@@ -152,7 +152,7 @@ void Task::execute(const Args& args, Background& background, std::atomic<u32>& f
         if (!proofSet.isComplete()) {
           log("Can't generate PRP-Proof of power %d for %u because some checkpoints are missing\n", args.proofPow, exponent);
         } else {        
-          fs::path name = proofSet.computeProof(gpu.get(), res64).save();
+          experimental::filesystem::path name = proofSet.computeProof(gpu.get(), res64).save();
           log("PRP-Proof '%s' generated\n", name.string().c_str());
         }
       }

@@ -14,14 +14,13 @@ public:
   static bool deleteTask(const Task &task);
   static void deletePRP(u32 exponent);
   
-  static Task makePRP(Args &args, u32 exponent) { return Task{Task::PRP, exponent}; }
+  static Task makePRP(Args &args, u32 exponent) { return Task(Task::PRP, exponent); }
   
   static Task makePM1(Args &args, u32 exponent) {
-    Task task{Task::PM1, exponent};
-    task.adjustBounds(args);
-    return task;
+   Task task(Task::PM1, exponent, args);
+   return task;
   }
 
-  static Task makeLL(Args& args, u32 exponent) { return Task{Task::LL, exponent}; }
-  static Task makeVerify(Args& args, string path) { return Task{Task::VERIFY, .verifyPath=path}; }
+  static Task makeLL(Args& args, u32 exponent) { return Task(Task::LL, exponent); }
+  static Task makeVerify(Args& args, string path) { return Task(Task::VERIFY, path); }
 };

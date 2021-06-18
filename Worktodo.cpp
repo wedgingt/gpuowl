@@ -43,7 +43,11 @@ std::optional<Task> parse(const std::string& line) {
           || (AIDStr[0]=0, sscanf(tail, "%u", &exp)) == 1) {
         string AID = AIDStr;
         if (AID == "N/A" || AID == "0") { AID = ""; }
-        return {{kind == "PRP" ? Task::PRP : (kind == "DoubleCheck" ? Task::LL : Task::PM1), exp, AID, line, B1, B2, bitLo, wantsPm1}};
+        Task::Kind k;
+        if (kind == "PRP") k = Task::PRP;
+        else if (kind == "DoubleCheck") k = Task::LL;
+        else k = Task::PM1;
+        return Task(k, exp, AID, line, B1, B2, bitLo, wantsPm1);
       }
     }
   }

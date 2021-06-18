@@ -7,7 +7,7 @@
 #include <cstdarg>
 #include <cassert>
 #include <memory>
-#include <filesystem>
+#include <experimental/filesystem>
 #include <vector>
 #include <string>
 #include <optional>
@@ -26,12 +26,12 @@ class File {
   File() = default;
   File(std::unique_ptr<FILE>&& ptr, std::string_view name) : ptr{std::move(ptr)}, name{name} {}
 
-  static File open(const fs::path &name, const char *mode, bool doLog) {
-    std::string sname{name.string()};
+  static File open(const std::string &name, const char *mode, bool doLog) {
+   std::string sname(name);
     std::unique_ptr<FILE> f{fopen(sname.c_str(), mode)};
     if (!f && doLog) {
       log("Can't open '%s' (mode '%s')\n", name.c_str(), mode);
-      throw(fs::filesystem_error("can't open file"s, name, {}));
+      throw(std::experimental::filesystem::filesystem_error("can't open file"s, name, {}));
     }
     return {std::move(f), sname};
   }
@@ -60,10 +60,10 @@ public:
   It begin() { return It{*this}; }
   It end() { return It{}; }
   
-  static File openRead(const fs::path& name, bool doThrow = false) { return open(name, "rb", doThrow); }
-  static File openWrite(const fs::path &name) { return open(name, "wb", true); }
-  static File openAppend(const fs::path &name) { return open(name, "ab", true); }
-  static void append(const fs::path& name, std::string_view s) { File::openAppend(name).write(s); }
+  static File openRead(const std::string& name, bool doThrow = false) { return open(name, "rb", doThrow); }
+  static File openWrite(const std::string &name) { return open(name, "wb", true); }
+  static File openAppend(const std::string &name) { return open(name, "ab", true); }
+  static void append(const std::string& name, std::string_view s) { File::openAppend(name).write(s); }
   
   File(FILE* ptr, std::string_view name) : ptr{ptr}, name{name} {}
 
@@ -96,7 +96,7 @@ public:
   
   void write(string_view s) {
     if (fwrite(s.data(), s.size(), 1, ptr.get()) != 1) {
-      throw fs::filesystem_error("can't write to file"s, name, {});
+     throw experimental::filesystem::filesystem_error("can't write to file"s, name, {});
     }
   }
 

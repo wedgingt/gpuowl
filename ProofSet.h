@@ -9,7 +9,7 @@
 #include <vector>
 #include <string>
 #include <cassert>
-#include <filesystem>
+#include <experimental/filesystem>
 #include <cinttypes>
 #include <climits>
 
@@ -46,10 +46,10 @@ public:
   */
   static const constexpr char* HEADER = "PRP PROOF\nVERSION=1\nHASHSIZE=64\nPOWER=%u\nNUMBER=M%u%c";
   
-  fs::path save() {
+  experimental::filesystem::path save() {
     string strE = to_string(E);
     u32 power = middles.size();
-    fs::path fileName = fs::current_path() / strE / (strE + '-' + to_string(power) + ".proof");
+    experimental::filesystem::path fileName = experimental::filesystem::current_path() / strE / (strE + '-' + to_string(power) + ".proof");
     File fo = File::openWrite(fileName);
     fo.printf(HEADER, power, E, '\n');
     fo.write(B.data(), (E-1)/8+1);
@@ -57,7 +57,7 @@ public:
     return fileName;
   }
 
-  static Proof load(fs::path path) {
+  static Proof load(experimental::filesystem::path path) {
     File fi = File::openRead(path, true);
     u32 E = 0, power = 0;
     char c = 0;
@@ -165,7 +165,7 @@ public:
     words.pop_back();
     if (checksum != crc32(words)) {
       log("checksum %x (expected %x) in '%s'\n", crc32(words), checksum, f.name.c_str());
-      throw fs::filesystem_error{"checksum mismatch", {}};
+      throw experimental::filesystem::filesystem_error{"checksum mismatch", {}};
     }
     return words;
   }
@@ -173,11 +173,11 @@ public:
   bool isValidTo(u32 limitK) const {
     if (!power) { return true; }
 
-    fs::create_directory(proofPath);
+    experimental::filesystem::create_directory(proofPath);
     
     try {
       for (u32 k = step; k <= limitK; k += step) { load(k); }
-    } catch (fs::filesystem_error&) {
+    } catch (experimental::filesystem::filesystem_error&) {
       return false;
     }
     return true;
@@ -238,5 +238,5 @@ private:
 
   static u32 crc32(const std::vector<u32>& words) { return crc32(words.data(), sizeof(words[0]) * words.size()); }
 
-  fs::path proofPath{fs::current_path() / to_string(E) / "proof"};
+  experimental::filesystem::path proofPath{experimental::filesystem::current_path() / to_string(E) / "proof"};
 };
