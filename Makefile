@@ -63,6 +63,9 @@ gpuowl-expanded.cl: gpuowl.cl
 gpuowl-wrap.cpp: gpuowl-expanded.cl head.txt tail.txt
 	cat head.txt gpuowl-expanded.cl tail.txt > gpuowl-wrap.cpp
 
+install: gpuowl
+	install -m 555 gpuowl ../
+
 FORCE:
 
 include $(wildcard $(patsubst %,$(DEPDIR)/%.d,$(basename $(SRCS))))
