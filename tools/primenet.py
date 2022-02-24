@@ -6,6 +6,9 @@
 import argparse
 import time
 import urllib
+import requests
+import os
+import upload
 
 from http import cookiejar
 from urllib.parse import urlencode
@@ -38,13 +41,20 @@ def sendOne(line):
     if "Error code" in res:
         begin = res.find("Error code")
         end   = res.find("</div>", begin)
-        print(res[begin:end], '\n')
-        return False
+        text = res[begin:end]
+        print(text)
+        already = text.startswith('Error code: 40, error text: This computer has already sent in this PRP result')
+        if already:
+            print('Already sent, will not retry')
+        return already
     else:
         begin = res.find("CPU credit is")
         end   = res.find("</div>", begin);
-        if begin >= 0 and end >= 0: print(res[begin:end], '\n')
-        return True
+        if begin >= 0 and end >= 0:
+            print(res[begin:end], '\n')
+            return True
+        else:
+            return False
 
 def appendLine(fileName, line):
     with open(fileName, 'a') as fo: print(line, file = fo, end = '\n')
@@ -68,12 +78,12 @@ def fetch(what):
     print(datetime.now(), " New assignment: ", line)
     return line
 
-workTypes = dict(PRP=150, PM1=4, LL_DC=101, PRP_DC=151, PRP_WORLD_RECORD=152, PRP_100M=153)
+workTypes = dict(PRP=150, PM1=4, LL_DC=101, PRP_DC=151, PRP_WORLD_RECORD=152, PRP_100M=153, PRP_P1=154)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-u', dest='username', default='', help="Primenet user name")
 parser.add_argument('-p', dest='password', help="Primenet password")
-parser.add_argument('-t', dest='timeout',  type=int, default=3600, help="Seconds to sleep between updates")
+parser.add_argument('-t', dest='timeout',  type=int, default=1800, help="Seconds to sleep between updates")
 parser.add_argument('--dirs', metavar='DIR', nargs='+', help="GpuOwl directories to scan", default=".")
 parser.add_argument('--tasks', dest='nTasks', type=int, default=None, help='Number of tasks to fetch ahead')
 
@@ -107,9 +117,8 @@ if not password:
 # Initial early login, to display any login errors early
 login(user, password)
 
-sents = [loadLines(d + "sent.txt") for d in dirs]
-
-def handle(folder, sent):
+def handle(folder):
+    sent = loadLines(folder + "sent.txt")
     (resultsName, worktodoName, sentName, retryName) = (folder + name + ".txt" for name in "results worktodo sent retry".split())
     
     newResults = loadLines(resultsName) - sent
@@ -124,12 +133,30 @@ def handle(folder, sent):
         if newResults: sendResults(newResults, sent, sentName, retryName)
         for _ in range(len(tasks), desiredTasks):
             appendLine(worktodoName, fetch(worktype))
+
+    try:
+        os.mkdir(folder + 'uploaded')
+    except FileExistsError:
+        pass
     
+    for entry in os.listdir(folder + 'proof'):
+        if entry.endswith('.proof'):
+            fileName = folder + 'proof/' + entry
+            if upload.uploadProof(user, fileName):
+                os.rename(fileName, folder + 'uploaded/' + entry)
 
 while True:
-    for (folder, sent) in zip(dirs, sents):
+    for folder in dirs:
         try:
-            handle(folder, sent)
+            handle(folder)
         except urllib.error.URLError as e:
             print(e)
+        except requests.exceptions.ConnectionError as e:
+            print(e)
+        except requests.exceptions.RequestException as e:
+            print(e)
+
+    if timeout == 0:
+        break
+    
     time.sleep(timeout)

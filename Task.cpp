@@ -6,11 +6,11 @@
 #include "Args.h"
 #include "File.h"
 #include "GmpUtil.h"
-#include "Background.h"
 #include "Worktodo.h"
-#include "checkpoint.h"
+#include "Saver.h"
 #include "version.h"
-#include "ProofSet.h"
+#include "Proof.h"
+#include "log.h"
 
 #include <cstdio>
 #include <cmath>
@@ -74,121 +74,100 @@ void writeResult(u32 E, const char *workType, const string &status, const std::s
 
 }
 
-void Task::writeResultPRP(const Args &args, bool isPrime, u64 res64, u32 fftSize, u32 nErrors) const {
-  assert(B1 == 0 && B2 == 0);
-  writeResult(exponent, "PRP-3", isPrime ? "P" : "C", AID, args, 
-              {json("res64", Hex{res64}),
-               json("residue-type", 1),
-               json("errors", vector<string>{json("gerbicz", nErrors)}),
-               json("fft-length", fftSize)
-              });
+void Task::writeResultPRP(const Args &args, bool isPrime, u64 res64, u32 fftSize, u32 nErrors, const fs::path& proofPath) const {
+  vector<string> fields{json("res64", Hex{res64}),
+                        json("residue-type", 1),
+                        json("errors", vector<string>{json("gerbicz", nErrors)}),
+                        json("fft-length", fftSize)
+  };
+
+  // "proof":{"version":1, "power":6, "hashsize":64, "md5":"0123456789ABCDEF"}, 
+  if (!proofPath.empty()) {
+    ProofInfo info = proof::getInfo(proofPath);
+    fields.push_back(json("proof", vector<string>{
+            json("version", 1),
+            json("power", info.power),
+            json("hashsize", 64),
+            json("md5", info.md5)
+            }));
+  }
+  
+  writeResult(exponent, "PRP-3", isPrime ? "P" : "C", AID, args, fields);
 }
 
-void Task::writeResultLL(const Args &args, bool isPrime, u64 res64, u32 fftSize) const {
-  assert(B1 == 0 && B2 == 0);
-  writeResult(exponent, "LL", isPrime ? "P" : "C", AID, args,
-              {json("res64", Hex{res64}),
-               json("fft-length", fftSize),
-               json("shift-count", 0)
-              });
-}
-
-void Task::writeResultPM1(const Args& args, const string& factor, u32 fftSize, bool didStage2) const {
+void Task::writeResultPM1(const Args& args, const string& factor, u32 fftSize) const {
+  assert(B1);
   bool hasFactor = !factor.empty();
-  string bounds = "\"B1\":"s + to_string(B1) + (didStage2 ? ", \"B2\":"s + to_string(B2) : "");
+
+  u32 reportB2 = B2;
+  if (hasFactor) {
+    auto factors = factorize(factor, exponent, B1, B2);
+    if (factors.empty()) {
+      log("Error attempting to split '%s'\n", factor.c_str());
+    } else {
+      reportB2 = factors.back();
+      assert(reportB2 <= B2);
+      string fstr;
+      for (u32 f : factors) { fstr += ", "s + to_string(f); }
+      log("%s %.1f bits%s\n", factor.c_str(), log2(factor), fstr.c_str());
+    }    
+  }
+
   writeResult(exponent, "PM1", hasFactor ? "F" : "NF", AID, args,
               {json("B1", B1),
-               didStage2 ? json("B2", B2) : "",
+               (reportB2 > B1) ? json("B2", reportB2) : "",
                json("fft-length", fftSize),
                factor.empty() ? "" : (json("factors") + ':' + "[\""s + factor + "\"]")
               });
 }
 
 void Task::adjustBounds(Args& args) {
-  if (kind == PM1) {
-    if (B1 == 0) { B1 = args.B1 ? args.B1 : (u32(exponent * 1e-7f + .5f) * 100'000); }
-    if (B2 == 0) { B2 = args.B2 ? args.B2 : (B1 * args.B2_B1_ratio); }
-    if (B1 < 15015) {
-      log("B1=%u too small, adjusted to 15015\n", B1);
-      B1 = 15015;
+  if (kind == PRP && wantsPm1) {
+    if (B1 == 0 && args.B1) { B1 = args.B1; }
+    if (B2 == 0 && args.B2) { B2 = args.B2; }
+
+    if (B1 == 0) {
+      float ratio = (bitLo <= 76) ? 20 : (bitLo == 77) ? 25 : 30;
+      u32 step = 500'000;
+      B1 = u32(float(exponent) / (step * ratio) + .5f) * step;
     }
-    if (B2 <= B1) {
-      log("B2=%u too small, adjusted to %u\n", B2, B1 * 10);
-      B2 = B1 * 10;
+    
+    if (B2 == 0) { B2 = B1 * args.B2_B1_ratio; }
+
+    if (B1 < 10000) {
+      log("B1=%u too small, adjusted to %u\n", B1, 10000);
+      B1 = 10000;
+    }
+      
+    if (B2 < 2 * B1) {
+      log("B2=%u too small, adjusted to %u\n", B2, 2 * B1);
+      B2 = 2 * B1;
     }
   }
 }
 
-void Task::execute(const Args& args, Background& background, std::atomic<u32>& factorFoundForExp) {
+void Task::execute(const Args& args) {
+  LogContext pushContext(std::to_string(exponent));
+  
   if (kind == VERIFY) {
-    experimental::filesystem::path path{verifyPath};
-    if (experimental::filesystem::status(path).type() == experimental::filesystem::file_type::directory) {
-      for (auto& entry : experimental::filesystem::directory_iterator(path)) {
-        log("- %s\n", entry.path().string().c_str());
-        if (is_regular_file(entry.status()) && entry.path().extension().string() == ".proof"s) {
-          path = entry.path();
-          break;
-        }
-      }
-    }    
-    Proof proof = Proof::load(path);
-    auto gpu = Gpu::make(proof.E, args, false);
+    Proof proof = Proof::load(verifyPath);
+    auto gpu = Gpu::make(proof.E, args);
     bool ok = proof.verify(gpu.get());
-    log("proof '%s' %s\n", path.string().c_str(), ok ? "verified" : "failed");
+    log("proof '%s' %s\n", verifyPath.c_str(), ok ? "verified" : "failed");
     return;
   }
 
-  assert(kind == PRP || kind == PM1 || kind == LL);
-  auto gpu = Gpu::make(exponent, args, kind == PM1);
+  assert(kind == PRP);
+  auto gpu = Gpu::make(exponent, args);
   auto fftSize = gpu->getFFTSize();
 
   if (kind == PRP) {
-    auto [isPrime, res64, nErrors] = gpu->isPrimePRP(exponent, args, factorFoundForExp);
-    bool abortedFactorFound = (!isPrime && !res64 && nErrors == u32(-1));
-    if (!abortedFactorFound) {
-      writeResultPRP(args, isPrime, res64, fftSize, nErrors);
-      if (args.proofPow) {
-        ProofSet proofSet{exponent, args.proofPow};
-        if (!proofSet.isComplete()) {
-          log("Can't generate PRP-Proof of power %d for %u because some checkpoints are missing\n", args.proofPow, exponent);
-        } else {        
-          experimental::filesystem::path name = proofSet.computeProof(gpu.get(), res64).save();
-          log("PRP-Proof '%s' generated\n", name.string().c_str());
-        }
-      }
-      
-      Worktodo::deleteTask(*this);
-    } else {
-      Worktodo::deletePRP(exponent);
-      factorFoundForExp = 0;
+    auto [factor, isPrime, res64, nErrors, proofPath] = gpu->isPrimePRP(args, *this);
+    if (factor.empty()) {
+      writeResultPRP(args, isPrime, res64, fftSize, nErrors, proofPath);
     }
-    if (args.cleanup && !isPrime) { PRPState::cleanup(exponent); }
-  } else if (kind == LL) {
-    auto [isPrime, res64] = gpu->isPrimeLL(exponent, args);
-    writeResultLL(args, isPrime, res64, fftSize);
+    
     Worktodo::deleteTask(*this);
-    if (args.cleanup && !isPrime) { PRPState::cleanup(exponent); }
-  } else if (kind == PM1) {
-    auto result = gpu->factorPM1(exponent, args, B1, B2);
-    if (holds_alternative<string>(result)) {
-      string factor = get<string>(result);
-      writeResultPM1(args, factor, fftSize, false);
-      if (!factor.empty()) { Worktodo::deletePRP(exponent); }
-    } else {
-      vector<u32> &data = get<vector<u32>>(result);
-      if (data.empty()) {
-        writeResultPM1(args, "", fftSize, false);
-      } else {
-        background.run([args, fftSize, data{std::move(data)}, task{*this}, &factorFoundForExp](){
-                         string factor = GCD(task.exponent, data, 0);
-                         bool factorFound = !factor.empty();
-                         log("%u P2 GCD: %s\n", task.exponent, factorFound ? factor.c_str() : "no factor");
-                         if (factorFound) { factorFoundForExp = task.exponent; }
-                         task.writeResultPM1(args, factor, fftSize, true);
-                       });
-      }
-    }
-    Worktodo::deleteTask(*this);
+    if (!isPrime) { Saver::cleanup(exponent, args); }
   }
-
 }

@@ -2,7 +2,6 @@
 
 #include "timeutil.h"
 #include "File.h"
-#include "AllocTrac.h"
 #include "clwrap.h"
 
 #include <cstdio>
@@ -295,7 +294,7 @@ cl_kernel makeKernel(cl_program program, const char *name) {
 cl_mem makeBuf_(cl_context context, unsigned kind, size_t size, const void *ptr) {
   int err;
   cl_mem buf = clCreateBuffer(context, kind, size, (void *) ptr, &err);
-  if (err == CL_OUT_OF_RESOURCES || err == CL_MEM_OBJECT_ALLOCATION_FAILURE) { throw gpu_bad_alloc(size); }
+  if (err == CL_OUT_OF_RESOURCES || err == CL_MEM_OBJECT_ALLOCATION_FAILURE) { throw bad_alloc{}; }
   
   CHECK2(err, "clCreateBuffer");
   return buf;
@@ -359,16 +358,6 @@ std::string getKernelArgName(cl_kernel k, int pos) {
   buf[size] = 0;
   return buf;
 }
-
-/*
-void Queue::zero(Buffer &buf, size_t size) {
-  assert(size % sizeof(int) == 0);
-  int zero = 0;
-  fillBuf(queue.get(), buf, &zero, sizeof(zero), size);
-  // CHECK(clEnqueueFillBuffer(queue.get(), buf.get(), &zero, sizeof(zero), 0, size, 0, 0, 0));
-  // finish();
-}
-*/
 
 void fillBuf(cl_queue q, cl_mem buf, void *pat, size_t patSize, size_t size, size_t start) {
   CHECK1(clEnqueueFillBuffer(q, buf, pat, patSize, start, size ? size : patSize, 0, 0, 0));

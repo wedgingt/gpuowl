@@ -1,7 +1,7 @@
 gpuowl
 version.inc
-gpuowl-wrap.cpp
-gpuowl-wrap.cl
+*-wrap.cpp
+*-wrap.cl
 version.new
 config.txt
 gpuowl.log
@@ -23,3 +23,11 @@ cmake-build-*/
 .d
 gpuowl-expanded.cl
 gpuowl.exe
+__pycache__
+core
+pm1/pm1
+D
+comgr.log
+\#*\#
+trashbin
+proof

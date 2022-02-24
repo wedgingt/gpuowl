@@ -2,44 +2,88 @@
 
 #pragma once
 
+#include "timeutil.h"
 #include "common.h"
+
 #include <cstdio>
 #include <cstdarg>
 #include <cassert>
+#include <unistd.h>
 #include <memory>
-#include <experimental/filesystem>
+#include <filesystem>
+#include <thread>
 #include <vector>
 #include <string>
 #include <optional>
 
+#if defined(_WIN32) || defined(__WIN32__)
+#include <io.h>
+#endif
+
 namespace fs = std::filesystem;
 
-namespace std {
-  template<> struct default_delete<FILE> {
-    void operator()(FILE *f) { if (f != nullptr) { fclose(f); } }
-  };
-}
-
 class File {
-  std::unique_ptr<FILE> ptr;
-
-  File() = default;
-  File(std::unique_ptr<FILE>&& ptr, std::string_view name) : ptr{std::move(ptr)}, name{name} {}
-
-  static File open(const std::string &name, const char *mode, bool doLog) {
-   std::string sname(name);
-    std::unique_ptr<FILE> f{fopen(sname.c_str(), mode)};
-    if (!f && doLog) {
-      log("Can't open '%s' (mode '%s')\n", name.c_str(), mode);
-      throw(std::experimental::filesystem::filesystem_error("can't open file"s, name, {}));
+  FILE* f = nullptr;
+  const bool readOnly;
+  
+  File(const fs::path &path, const string& mode, bool throwOnError)
+    : readOnly{mode == "rb"}, name{path.string()} {    
+    assert(readOnly || throwOnError);
+    
+    f = fopen(name.c_str(), mode.c_str());
+    if (!f && throwOnError) {
+      log("Can't open '%s' (mode '%s')\n", name.c_str(), mode.c_str());
+      throw(fs::filesystem_error("can't open file"s, path, {}));
     }
-    return {std::move(f), sname};
+  }
+
+  bool readNoThrow(void* data, u32 nBytes) { return fread(data, nBytes, 1, get()); }
+  
+  void read(void* data, u32 nBytes) {
+    if (!readNoThrow(data, nBytes)) { throw(std::ios_base::failure(name + ": can't read")); }
+  }
+
+  void datasync() {
+    fflush(f);
+#if defined(_WIN32) || defined(__WIN32__)
+    _commit(fileno(f));
+#else
+    fdatasync(fileno(f));
+#endif
   }
   
 public:
+  const std::string name;
+
+  static File openRead(const fs::path& name) { return File{name, "rb", false}; }
+  static File openReadThrow(const fs::path& name) { return File{name, "rb", true}; }
+  
+  static File openWrite(const fs::path& name) { return File{name, "wb", true}; }
+  
+  static File openAppend(const fs::path &name) { return File{name, "ab", true}; }
+  
+  static void append(const fs::path& name, std::string_view text) { File::openAppend(name).write(text); }
+
+  File(FILE* f, const string& name) : f{f}, readOnly{false}, name{name} {}
+  
+  File(File&& other) : f{other.f}, readOnly{other.readOnly}, name{other.name} { other.f = nullptr; }
+  
+  File(const File& other) = delete;
+  File& operator=(const File& other) = delete;
+  File& operator=(File&& other) = delete;
+
+  ~File() {
+    if (!f) { return; }
+
+    if (!readOnly) { datasync(); }
+
+    fclose(f);
+    f = nullptr;
+  }
+  
   class It {
   public:
-    It(File& file) : file{&file}, line{file ? file.maybeReadLine() : nullopt} {}
+    explicit It(File& file) : file{&file}, line{file ? file.maybeReadLine() : nullopt} {}
     It() = default;
 
     bool operator==(const It& rhs) const { return !line && !rhs.line; }
@@ -60,15 +104,6 @@ public:
   It begin() { return It{*this}; }
   It end() { return It{}; }
   
-  static File openRead(const std::string& name, bool doThrow = false) { return open(name, "rb", doThrow); }
-  static File openWrite(const std::string &name) { return open(name, "wb", true); }
-  static File openAppend(const std::string &name) { return open(name, "ab", true); }
-  static void append(const std::string& name, std::string_view s) { File::openAppend(name).write(s); }
-  
-  File(FILE* ptr, std::string_view name) : ptr{ptr}, name{name} {}
-
-  const std::string name;
-  
   template<typename T>
   void write(const vector<T>& v) { write(v.data(), v.size() * sizeof(T)); }
 
@@ -81,7 +116,7 @@ public:
   int printf(const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
     va_list va;
     va_start(va, fmt);
-    int ret = vfprintf(ptr.get(), fmt, va);
+    int ret = vfprintf(f, fmt, va);
     va_end(va);
     return ret;
   }
@@ -89,19 +124,19 @@ public:
   int scanf(const char *fmt, ...) __attribute__((format(scanf, 2, 3))) {
     va_list va;
     va_start(va, fmt);
-    int ret = vfscanf(ptr.get(), fmt, va);
+    int ret = vfscanf(f, fmt, va);
     va_end(va);
     return ret;
   }
   
   void write(string_view s) {
-    if (fwrite(s.data(), s.size(), 1, ptr.get()) != 1) {
-     throw experimental::filesystem::filesystem_error("can't write to file"s, name, {});
+    if (fwrite(s.data(), s.size(), 1, f) != 1) {
+      throw fs::filesystem_error("can't write to file"s, name, {});
     }
   }
 
-  operator bool() const { return bool(ptr); }
-  FILE* get() const { return ptr.get(); }
+  operator bool() const { return f != nullptr; }
+  FILE* get() const { return f; }
 
   long ftell() const {
     long pos = ::ftell(get());
@@ -131,13 +166,13 @@ public:
 
   // Returns newline-ended line.
   std::string readLine() {
-    char buf[512];
+    char buf[1024];
     buf[0] = 0;
     bool ok = fgets(buf, sizeof(buf), get());
     if (!ok) { return ""; }  // EOF or error
     string line = buf;
     if (line.empty() || line.back() != '\n') {
-      log("%s : line \"%s\" does not end with a newline", name.c_str(), line.c_str());
+      log("%s : line \"%s\" does not end with a newline\n", name.c_str(), line.c_str());
       throw "lines must end with newline";
     }
     return line;
@@ -157,10 +192,26 @@ public:
     return ret;
   }
 
-  void read(void* data, u32 nBytes) {
-    if (!fread(data, nBytes, 1, get())) { throw(std::ios_base::failure(name + ": can't read")); }
+  template<typename T>
+  std::vector<T> readWithCRC(u32 nWords, u32 crc) {
+    auto data = read<T>(nWords);
+    if (crc != crc32(data)) {
+      log("File '%s' : CRC found %u expected %u\n", name.c_str(), crc, crc32(data));
+      throw "CRC";
+    }    
+    return data;
   }
 
+  std::vector<u32> readBytesLE(u32 nBytes) {
+    assert(nBytes > 0);
+    u32 nWords = (nBytes - 1) / 4 + 1;
+    vector<u32> data(nWords);
+    read(data.data(), nBytes);
+    return data;
+  }
+  
+  u32 readUpTo(void* data, u32 nUpToBytes) { return fread(data, 1, nUpToBytes, get()); }
+  
   string readAll() {
     size_t sz = size();
     return {read<char>(sz).data(), sz};

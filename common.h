@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "log.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -11,19 +13,12 @@ using i32 = int32_t;
 using u32 = uint32_t;
 using i64 = int64_t;
 using u64 = uint64_t;
+using f128 = __float128;
 
 static_assert(sizeof(u8)  == 1, "size u8");
 static_assert(sizeof(u32) == 4, "size u32");
 static_assert(sizeof(u64) == 8, "size u64");
 
-#ifdef __GNUC__
-void log(const char *fmt, ...) __attribute__ ((format(printf, 1, 2)));
-#else
-void log(const char *fmt, ...);
-#endif
-
-void initLog();
-void initLog(const char *);
 
 using namespace std;
 namespace std::filesystem{};
@@ -35,4 +30,28 @@ string rstripNewline(string s);
 
 using Words = vector<u32>;
 
+inline u64 res64(const Words& words) { return words.empty() ? 0 : ((u64(words[1]) << 32) | words[0]); }
+
+inline Words makeWords(u32 E, u32 value) {
+  Words ret((E-1)/32 +1);
+  ret[0] = value;
+  return ret;
+}
+
 inline u32 roundUp(u32 x, u32 multiple) { return ((x - 1) / multiple + 1) * multiple; }
+
+u32 crc32(const void* data, size_t size);
+
+inline u32 crc32(const std::vector<u32>& words) { return crc32(words.data(), sizeof(words[0]) * words.size()); }
+
+std::string formatBound(u32 b);
+
+template<typename To, typename From> To as(From from) {
+  union Pun {
+    Pun(const From& f) : from{f} {}    
+    From from;
+    To to;
+    static_assert(sizeof(To) == sizeof(From));
+  };
+  return Pun{from}.to;
+}

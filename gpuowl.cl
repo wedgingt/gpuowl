@@ -22,12 +22,8 @@ NEWEST_FFT5
 CARRY32 <AMD default for PRP when appropriate>
 CARRY64 <nVidia default>, <AMD default for PM1 when appropriate>
 
-CARRYM32
-CARRYM64 <default>
-
-ORIG_SLOWTRIG
-NEW_SLOWTRIG <default>          // Our own sin/cos implementation
-ROCM_SLOWTRIG                   // Use ROCm's private reduced-argument sin/cos
+TRIG_COMPUTE=<n> (default 2), can be used to balance between compute and memory for trigonometrics. TRIG_COMPUTE=0 does more memory access, TRIG_COMPUTE=2 does more compute,
+and TRIG_COMPUTE=1 is in between.
 
 DEBUG      enable asserts. Slow, but allows to verify that all asserts hold.
 STATS      enable stats about roundoff distribution and carry magnitude
@@ -48,7 +44,6 @@ EXP        the exponent
 WIDTH
 SMALL_HEIGHT
 MIDDLE
-PM1        set to indicate that a P-1 test will be done (as opposed to PRP)
 
 -- Derived from above:
 BIG_HEIGHT = SMALL_HEIGHT * MIDDLE
@@ -60,15 +55,14 @@ G_W        "group width"
 G_H        "group height"
  */
 
+#if !defined(TRIG_COMPUTE)
+#define TRIG_COMPUTE 2
+#endif
+
 #define STR(x) XSTR(x)
 #define XSTR(x) #x
 
 #define OVERLOAD __attribute__((overloadable))
-
-#if __OPENCL_VERSION__ < 200
-#pragma message "GpuOwl requires OpenCL 200, found " STR(__OPENCL_VERSION__)
-// #error OpenCL >= 2.0 required
-#endif
 
 #pragma OPENCL FP_CONTRACT ON
 
@@ -104,18 +98,10 @@ G_H        "group height"
 #error Conflict: both CARRY32 and CARRY64 requested
 #endif
 
-#if CARRYM32 && CARRYM64
-#error Conflict: both CARRYM32 and CARRYM64 requested
-#endif
-
 #if !CARRY32 && !CARRY64
 #if AMDGPU
 #define CARRY32 1
 #endif
-#endif
-
-#if !CARRYM32 && !CARRYM64
-#define CARRYM64 1
 #endif
 
 // The ROCm optimizer does a very, very poor job of keeping register usage to a minimum.  This negatively impacts occupancy
@@ -146,10 +132,6 @@ G_H        "group height"
 
 #define G_W (WIDTH / NW)
 #define G_H (SMALL_HEIGHT / NH)
-
-#if !ORIG_SLOWTRIG && !NEW_SLOWTRIG
-#define NEW_SLOWTRIG 1
-#endif
 
 // 5M timings for MiddleOut & carryFused, ROCm 2.10, RadeonVII, sclk4, mem 1200
 // OUT_WG=256, OUT_SIZEX=4, OUT_SPACING=1 (old WorkingOut4) : 154 + 252 = 406 (but may be best on nVidia)
@@ -182,14 +164,6 @@ G_H        "group height"
 #endif
 #endif
 
-
-// 5M timings for MiddleIn & tailFused, ROCm 2.10, RadeonVII, sclk4, mem 1200
-// IN_WG=256, IN_SIZEX=4, IN_SPACING=1 (old WorkingIn4) : 177 + 164 (but may be best on nVidia)
-// IN_WG=256, IN_SIZEX=8, IN_SPACING=1 (old WorkingIn3): 129 + 166 = 295
-// IN_WG=256, IN_SIZEX=32, IN_SPACING=1 (old WorkingIn5): 107 + 171 = 278  <- best
-// IN_WG=256, IN_SIZEX=8, IN_SPACING=2: 139 + 166 = 305
-// IN_WG=256, IN_SIZEX=32, IN_SPACING=4: 121 + 161 = 282
-
 #if !IN_WG
 #define IN_WG 256
 #endif
@@ -203,14 +177,6 @@ G_H        "group height"
 #else
 #define IN_SIZEX 32
 #endif
-#endif
-#endif
-
-#if !IN_SPACING
-#if AMDGPU
-#define IN_SPACING 1
-#else
-#define IN_SPACING 1
 #endif
 #endif
 
@@ -234,78 +200,244 @@ typedef int i32;
 typedef uint u32;
 typedef long i64;
 typedef ulong u64;
-typedef double T;
-typedef double2 T2;
+
 typedef i32 Word;
 typedef int2 Word2;
-
-// Because the carry output of both carryA and carryM is consummed by carryB,
-// we can use 32-bit in carry A/B/M only when carryA and carryM agree.
-#if CARRY32 && CARRYM32
-typedef i32 CarryABM;
-#else
 typedef i64 CarryABM;
+
+#if SP
+
+typedef float3 T;
+typedef float6 TT;
+#define RE(a) (a.s012)
+#define IM(a) (a.s345)
+
+#else
+
+typedef double T;
+typedef double2 TT;
+#define RE(a) (a.x)
+#define IM(a) (a.y)
+
 #endif
 
-T2 U2(T a, T b) { return (T2)(a, b); }
+void bar() { barrier(0); }
 
-bool test(u32 bits, u32 pos) { return (bits >> pos) & 1; }
+TT U2(T a, T b) { return (TT) (a, b); }
 
-#define STEP (NWORDS - (EXP % NWORDS))
-bool isBigWord(u32 extra) { return extra < NWORDS - STEP; }
-u32 bitlen(bool b) { return EXP / NWORDS + b; }
-u32 reduce(u32 extra) { return extra < NWORDS ? extra : (extra - NWORDS); }
+
+#if SP
+
+// See Fast-Two-Sum and Two-Sum in
+// "Extended-Precision Floating-Point Numbers for GPU Computation" by Andrew Thall
+
+// 3 ADD. Requires |a| >= |b|
+OVERLOAD float2 quickTwoSum(float a, float b) {
+  float s = a + b;
+  return (float2) (s, b - (s - a));
+}
+
+OVERLOAD float quickTwoSum(float a, float b, float* e) {
+  float s = a + b;
+  *e = b - (s - a);
+  return s;
+}
+
+OVERLOAD float quickTwoSum(float a, float* b) {
+  float s = a + *b;
+  *b -= (s - a);
+  return s;
+}
+
+// 6 ADD
+OVERLOAD float2 twoSum(float a, float b) {
+#if 0
+  if (fabs(b) > fabs(a)) { float t = a; a = b; b = t; }
+  return quickTwoSum(a, b);
+#elif 0
+  return (fabs(a) >= fabs(b)) ? quickTwoSum(a, b) : quickTwoSum(b, a);
+#else
+  // No branch but twice the ADDs.
+  float s = a + b;
+  float b1 = s - a;
+  float a1 = s - b1;
+  float e = (b - b1) + (a - a1);
+  return (float2) (s, e);
+#endif
+  
+  // Eqivalent (?)
+  // float2 s1 = fastSum(a, b);
+  // float2 s2 = fastSum(b, a);
+  // return (float2) (s1.x, s1.y + s2.y);
+}
+
+OVERLOAD float twoSum(float a, float b, float* e) {
+  float s = a + b;
+  float b1 = s - a;
+  float a1 = s - b1;
+  *e = (b - b1) + (a - a1);
+  return s;
+}
+
+// 16 ADD.
+float3 renormalize(float a, float b, float c, float d) {
+  c = quickTwoSum(c, &d);
+  b = quickTwoSum(b, &c);
+  a = quickTwoSum(a, &b);
+
+  c = quickTwoSum(c, &d);
+  b = quickTwoSum(b, &c);
+
+  return (float3) (a, b, c + d);  
+}
+
+// 54 ADD.
+OVERLOAD float3 sum(float3 u, float3 v) {
+  float a, b, c, d, e, f;
+  a = twoSum(u.x, v.x, &e);
+  
+  b = twoSum(u.y, v.y, &f);
+  b = twoSum(b, e, &e);
+
+  c = twoSum(u.z, v.z, &d);
+  c = twoSum(c, f, &f);
+  c = twoSum(c, e, &e);
+
+  return renormalize(a, b, c, d + (f + e));
+}
+
+/*
+// 21 ADD. See https://web.mit.edu/tabbott/Public/quaddouble-debian/qd-2.3.4-old/docs/qd.pdf , Figure 10.
+OVERLOAD float3 sum(float3 a, float3 b) {
+  float2 c0 = twoSum(a.x, b.x);
+  float2 t1 = twoSum(a.y, b.y);
+  float2 c1 = twoSum(t1.x, c0.y);
+  return (float3) (c0.x, c1.x, a.z + b.z + t1.y + c1.y);
+}
+*/
+
+// 2 MUL
+OVERLOAD float2 twoMul(float a, float b) {
+  float c = a * b;
+  float d = fma(a, b, -c);
+  return (float2) (c, d);
+}
+
+// 15 ADD + 9 MUL
+OVERLOAD float3 mul(float3 a, float3 b) {
+  float2 c = twoMul(a.x, b.x);
+  
+  float2 d0 = twoMul(a.x, b.y);
+  float2 d1 = twoMul(a.y, b.x);
+
+  float2 e0 = twoSum(d0.x, d1.x);
+  float2 e1 = twoSum(e0.x, c.y);
+  
+  float f = fma(a.x, b.z, d0.y + d1.y);
+  f = fma(a.y, b.y, f + e0.y);
+  f = fma(a.z, b.x, f + e1.y);
+
+#if 0
+  // e0 = sum(c.y, d0.x);
+  // e1 = sum(e0.x, d1.x);  
+  f = fma(a.z, b.x, fma(a.y, b.y, fma(a.x, b.z, d0.y))) + d1.y + e0.y + e1.y;
+#endif
+  
+  return (float3) (c.x, e1.x, f);
+}
+
+// 15 ADD + 8 MUL
+OVERLOAD float3 mul(float3 a, float2 b) {
+  float2 c = twoMul(a.x, b.x);
+  
+  float2 d0 = twoMul(a.x, b.y);
+  float2 d1 = twoMul(a.y, b.x);
+
+  float2 e0 = twoSum(d0.x, d1.x);
+  float2 e1 = twoSum(e0.x, c.y);
+  
+  f = fma(a.y, b.y, d0.y + d1.y + e0.y);
+  f = fma(a.z, b.x, f + e1.y);
+
+  return (float3) (c.x, e1.x, f);
+}
+
+// 9 ADD + 6 MUL
+OVERLOAD float3 sq(float3 a) {
+  float2 c = twoMul(a.x, a.x);
+  float2 d = twoMul(a.x, a.y);
+  float2 e = twoSum(2 * d.x, c.y);
+  float f = fma(a.y, a.y, 2 * fma(a.x, a.z, d.y)) + e.y;
+  return (float3) (c.x, e.x, f);
+}
+
+// TODO: merge the ADD into the MUL
+OVERLOAD float3 mad1(float3 a, float3 b, float3 c) { return sum(mul(a, b), c); }
+
+#else
+
+// ---- DP ----
+
+OVERLOAD double sum(double a, double b) { return a + b; }
+
+// double sub(double a, double b) { return a - b; }
+
+OVERLOAD double mad1(double x, double y, double z) { return x * y + z; }
+  // fma(x, y, z); }
+
+OVERLOAD double mul(double x, double y) { return x * y; }
+
+#endif
+
 
 T add1_m2(T x, T y) {
-#if !NO_OMOD
+#if !NO_OMOD && !SP
   T tmp;
    __asm volatile("v_add_f64 %0, %1, %2 mul:2" : "=v" (tmp) : "v" (x), "v" (y));
    return tmp;
 #else
-   return 2 * (x + y);
+   return 2 * sum(x, y);
 #endif
 }
 
 T sub1_m2(T x, T y) {
-#if !NO_OMOD
+#if !NO_OMOD && !SP
   T tmp;
   __asm volatile("v_add_f64 %0, %1, -%2 mul:2" : "=v" (tmp) : "v" (x), "v" (y));
   return tmp;
 #else
-  return 2 * (x - y);
+  return 2 * sum(x, -y);
 #endif
 }
 
 // x * y * 2
 T mul1_m2(T x, T y) {
-#if !NO_OMOD
+#if !NO_OMOD && !SP
   T tmp;
   __asm volatile("v_mul_f64 %0, %1, %2 mul:2" : "=v" (tmp) : "v" (x), "v" (y));
   return tmp;
 #else
-  return x * y * 2;
+  return 2 * mul(x, y);
 #endif
 }
 
-// Force generation of an FMA instruction where second argument is a constant.
-// (as fma() is not necesarilly preserved with -cl-fast-relaxed-math )
-T forced_fma_by_const(T x, const T y, T z) {
-#if HAS_ASM
-  double out;
-  __asm("v_fma_f64 %0, %1, %2, %3" : "=v"(out) : "v"(x), "s"(y), "v"(z));
-  return out;
+
+OVERLOAD T fancyMul(T x, const T y) {
+#if SP
+  // for SP we skip the "+1" trick.
+  return mul(x, y);
 #else
-  return fma(x, y, z);
+  // x * (y + 1);
+  return fma(x, y, x);
 #endif
 }
 
-// Multiply by (1+const).
-T mul_by_const_plus_1(T x, const T y) { return forced_fma_by_const(x, y, x); }
-
-T mad1(T x, T y, T z) { return x * y + z; }
+OVERLOAD TT fancyMul(TT x, const TT y) {
+  return U2(fancyMul(RE(x), RE(y)), fancyMul(IM(x), IM(y)));
+}
 
 T mad1_m2(T a, T b, T c) {
-#if !NO_OMOD
+#if !NO_OMOD && !SP
   double out;
   __asm volatile("v_fma_f64 %0, %1, %2, %3 mul:2" : "=v" (out) : "v" (a), "v" (b), "v" (c));
   return out;
@@ -314,18 +446,8 @@ T mad1_m2(T a, T b, T c) {
 #endif
 }
 
-T msb1_m2(T a, T b, T c) {
-#if !NO_OMOD
-  double out;
-  __asm volatile("v_fma_f64 %0, %1, %2, -%3 mul:2" : "=v" (out) : "v" (a), "v" (b), "v" (c));
-  return out;
-#else
-  return 2 * mad1(a, b, -c);
-#endif
-}
-
 T mad1_m4(T a, T b, T c) {
-#if !NO_OMOD
+#if !NO_OMOD && !SP
   double out;
   __asm volatile("v_fma_f64 %0, %1, %2, %3 mul:4" : "=v" (out) : "v" (a), "v" (b), "v" (c));
   return out;
@@ -334,48 +456,94 @@ T mad1_m4(T a, T b, T c) {
 #endif
 }
 
-T msb1_m4(T a, T b, T c) {
-#if !NO_OMOD
-  double out;
-  __asm volatile("v_fma_f64 %0, %1, %2, -%3 mul:4" : "=v" (out) : "v" (a), "v" (b), "v" (c));
-  return out;
-#else
-  return 4 * mad1(a, b, -c);
-#endif
-}
-
-// complex add * 2
-T2 add_m2(T2 a, T2 b) { return U2(add1_m2(a.x, b.x), add1_m2(a.y, b.y)); }
+#if SP
 
 // complex square
-T2 sq(T2 a) { return U2(mad1(a.x, a.x, - a.y * a.y), mul1_m2(a.x, a.y)); }
+OVERLOAD TT sq(TT a) { return U2(sum(sq(RE(a)), -sq(IM(a))), 2 * mul(RE(a), IM(a))); }
 
 // complex mul
-T2 mul(T2 a, T2 b) { return U2(mad1(a.x, b.x, - a.y * b.y), mad1(a.x, b.y, a.y * b.x)); }
+OVERLOAD TT mul(TT a, TT b) { return U2(mad1(RE(a), RE(b), -mul(IM(a), IM(b))), mad1(RE(a), IM(b), mul(IM(a), RE(b)))); }
+
+#else
+
+// complex square
+OVERLOAD TT sq(TT a) { return U2(mad1(RE(a), RE(a), - IM(a) * IM(a)), mul1_m2(RE(a), IM(a))); }
+
+// complex mul
+OVERLOAD TT mul(TT a, TT b) { return U2(mad1(RE(a), RE(b), - IM(a) * IM(b)), mad1(RE(a), IM(b), IM(a) * RE(b))); }
+
+#endif
+
+
+bool test(u32 bits, u32 pos) { return (bits >> pos) & 1; }
+
+#define STEP (NWORDS - (EXP % NWORDS))
+// bool isBigWord(u32 extra) { return extra < NWORDS - STEP; }
+
+u32 bitlen(bool b) { return EXP / NWORDS + b; }
+
+
+// complex add * 2
+TT add_m2(TT a, TT b) { return U2(add1_m2(RE(a), RE(b)), add1_m2(IM(a), IM(b))); }
 
 // complex mul * 2
-T2 mul_m2(T2 a, T2 b) { return U2(msb1_m2(a.x, b.x, a.y * b.y), mad1_m2(a.x, b.y, a.y * b.x)); }
+TT mul_m2(TT a, TT b) { return U2(mad1_m2(RE(a), RE(b), -mul(IM(a), IM(b))), mad1_m2(RE(a), IM(b), mul(IM(a), RE(b)))); }
 
 // complex mul * 4
-T2 mul_m4(T2 a, T2 b) { return U2(msb1_m4(a.x, b.x, a.y * b.y), mad1_m4(a.x, b.y, a.y * b.x)); }
+TT mul_m4(TT a, TT b) { return U2(mad1_m4(RE(a), RE(b), -mul(IM(a), IM(b))), mad1_m4(RE(a), IM(b), mul(IM(a), RE(b)))); }
 
 // complex fma
-T2 mad_m1(T2 a, T2 b, T2 c) { return U2(mad1(a.x, b.x, mad1(a.y, -b.y, c.x)), mad1(a.x, b.y, mad1(a.y, b.x, c.y))); }
+TT mad_m1(TT a, TT b, TT c) { return U2(mad1(RE(a), RE(b), mad1(IM(a), -IM(b), RE(c))), mad1(RE(a), IM(b), mad1(IM(a), RE(b), IM(c)))); }
 
 // complex fma * 2
-T2 mad_m2(T2 a, T2 b, T2 c) { return U2(mad1_m2(a.x, b.x, mad1(a.y, -b.y, c.x)), mad1_m2(a.x, b.y, mad1(a.y, b.x, c.y))); }
+TT mad_m2(TT a, TT b, TT c) { return U2(mad1_m2(RE(a), RE(b), mad1(IM(a), -IM(b), RE(c))), mad1_m2(RE(a), IM(b), mad1(IM(a), RE(b), IM(c)))); }
+
+TT mul_t4(TT a)  { return U2(IM(a), -RE(a)); } // mul(a, U2( 0, -1)); }
 
 
-T2 mul_t4(T2 a)  { return U2(a.y, -a.x); }                          // mul(a, U2( 0, -1)); }
-T2 mul_t8(T2 a)  { return U2(a.y + a.x, a.y - a.x) * M_SQRT1_2; }   // mul(a, U2( 1, -1)) * (T)(M_SQRT1_2); }
-T2 mul_3t8(T2 a) { return U2(a.x - a.y, a.x + a.y) * - M_SQRT1_2; } // mul(a, U2(-1, -1)) * (T)(M_SQRT1_2); }
+#if SP
 
-T2 swap(T2 a) { return U2(a.y, a.x); }
-T2 conjugate(T2 a) { return U2(a.x, -a.y); }
+#define SP_SQRT1_2 (float3) (0.707106769,1.21016175e-08,-3.81403372e-16)
 
-void bar() { barrier(0); }
+TT mul_t8(TT a)  {
+  return U2(mul(sum(IM(a),  RE(a)), SP_SQRT1_2),
+            mul(sum(IM(a), -RE(a)), SP_SQRT1_2));
+}
 
-T2 weight(Word2 a, T2 w) { return U2(a.x, a.y) * w; }
+TT mul_3t8(TT a) {
+  return U2(mul(sum(IM(a), -RE(a)),  SP_SQRT1_2),
+            mul(sum(IM(a),  RE(a)), -SP_SQRT1_2));
+}
+
+#else
+
+TT mul_t8(TT a)  { return U2(IM(a) + RE(a), IM(a) - RE(a)) *   M_SQRT1_2; }  // mul(a, U2( 1, -1)) * (T)(M_SQRT1_2); }
+TT mul_3t8(TT a) { return U2(RE(a) - IM(a), RE(a) + IM(a)) * - M_SQRT1_2; }  // mul(a, U2(-1, -1)) * (T)(M_SQRT1_2); }
+
+#endif
+
+TT swap(TT a)      { return U2(IM(a), RE(a)); }
+TT conjugate(TT a) { return U2(RE(a), -IM(a)); }
+
+#if SP
+
+#error TODO
+
+float2 fromWord(Word u) {
+  float a = u;
+  return (float2) (a, u - a); 
+}
+
+TT weight(Word2 a, TT w) {
+  return U2(mul(RE(w), fromWord(RE(a))),
+            mul(IM(w), fromWord(IM(a))));
+}
+
+#else
+
+TT weight(Word2 a, TT w) { return w * U2(RE(a), IM(a)); }
+
+#endif
 
 u32 bfi(u32 u, u32 mask, u32 bits) {
 #if HAS_ASM
@@ -388,15 +556,25 @@ u32 bfi(u32 u, u32 mask, u32 bits) {
 #endif
 }
 
-double optionalDouble(double iw) {
+#if SP
+
+float3 optionalDouble(float3 iw) { return (iw.x < 1.0f) ? 2 * iw : iw; }
+
+float3 optionalHalve(float3 w) { return (w.x >= 4) ? 0.5f * w : w; }
+
+#else
+
+T optionalDouble(T iw) {
   // In a straightforward implementation, inverse weights are between 0.5 and 1.0.  We use inverse weights between 1.0 and 2.0
   // because it allows us to implement this routine with a single OR instruction on the exponent.   The original implementation
   // where this routine took as input values from 0.25 to 1.0 required both an AND and an OR instruction on the exponent.
   // return iw <= 1.0 ? iw * 2 : iw;
   assert(iw > 0.5 && iw < 2);
   uint2 u = as_uint2(iw);
-  // u.y |= 0x00100000;
-  u.y = bfi(u.y, 0xffefffff, 0x00100000);
+  
+  u.y |= 0x00100000;
+  // u.y = bfi(u.y, 0xffefffff, 0x00100000);
+  
   return as_double(u);
 }
 
@@ -411,6 +589,8 @@ T optionalHalve(T w) {    // return w >= 4 ? w / 2 : w;
   return as_double(u);
 }
 
+#endif
+
 #if HAS_ASM
 i32  lowBits(i32 u, u32 bits) { i32 tmp; __asm("v_bfe_i32 %0, %1, 0, %2" : "=v" (tmp) : "v" (u), "v" (bits)); return tmp; }
 u32 ulowBits(u32 u, u32 bits) { u32 tmp; __asm("v_bfe_u32 %0, %1, 0, %2" : "=v" (tmp) : "v" (u), "v" (bits)); return tmp; }
@@ -420,6 +600,43 @@ i32  lowBits(i32 u, u32 bits) { return ((u << (32 - bits)) >> (32 - bits)); }
 u32 ulowBits(u32 u, u32 bits) { return ((u << (32 - bits)) >> (32 - bits)); }
 i32 xtract32(i64 x, u32 bits) { return ((i32) (x >> bits)); }
 #endif
+
+
+#if SP
+
+i32 split(float3 x, u32 nBits, i64 *outCarry) {
+  
+}
+
+OVERLOAD Word carryStep(T x, i64 inCarry, i64 *outCarry, bool isBigWord) {
+  u32 nBits = bitlen(isBigWord);
+  Word w = split(x, nBits, outCarry);
+  w = lowBits(inCarry + w, nBits);
+  *outCarry += (inCarry - w) >> nBits;
+  return w;
+}
+
+
+
+Word2 OVERLOAD carryPair(TT u, i64 *outCarry, bool b1, bool b2, i64 inCarry, u32* carryMax, bool exactness) {
+  iCARRY midCarry;
+  Word a = carryStep(doubleToLong(u.x, (iCARRY) 0) + inCarry, &midCarry, b1);
+  Word b = carryStep(doubleToLong(u.y, (iCARRY) 0) + midCarry, outCarry, b2);
+
+  return (Word2) (a, b);
+}
+
+Word2 OVERLOAD carryFinal(Word2 u, i64 inCarry, bool b1) {
+  i32 tmpCarry;
+  u.x = carryStep(u.x + inCarry, &tmpCarry, b1);
+  u.y += tmpCarry;
+  return u;
+}
+
+
+#else
+
+
 
 // We support two sizes of carry in carryFused.  A 32-bit carry halves the amount of memory used by CarryShuttle,
 // but has some risks.  As FFT sizes increase and/or exponents approach the limit of an FFT size, there is a chance
@@ -489,7 +706,7 @@ const bool CAN_BE_INEXACT = 1;
 Word OVERLOAD carryStep(i64 x, i64 *outCarry, bool isBigWord, bool exactness) {
   u32 nBits = bitlen(isBigWord);
   Word w = (exactness == MUST_BE_EXACT) ? lowBits(x, nBits) : ulowBits(x, nBits);
-  if (exactness == MUST_BE_EXACT) x -= w;
+  if (exactness == MUST_BE_EXACT) { x -= w; }
   *outCarry = x >> nBits;
   return w;
 }
@@ -504,7 +721,7 @@ Word OVERLOAD carryStep(i64 x, i32 *outCarry, bool isBigWord, bool exactness) {
 #else
   *outCarry = xtract32(x, nBits);
 #endif
-  if (exactness == MUST_BE_EXACT) *outCarry += (w < 0);
+  if (exactness == MUST_BE_EXACT) { *outCarry += (w < 0); }
   CARRY32_CHECK(*outCarry);
   return w;
 }
@@ -523,29 +740,19 @@ typedef i32 CFcarry;
 typedef i64 CFcarry;
 #endif
 
-#if CARRYM32
-typedef i32 CFMcarry;
-#else
 typedef i64 CFMcarry;
-#endif
 
 u32 bound(i64 carry) { return min(abs(carry), 0xfffffffful); }
+
+typedef TT T2;
+
+#endif // DP
 
 //{{ carries
 Word2 OVERLOAD carryPair(T2 u, iCARRY *outCarry, bool b1, bool b2, iCARRY inCarry, u32* carryMax, bool exactness) {
   iCARRY midCarry;
-  Word a = carryStep(doubleToLong(u.x, inCarry), &midCarry, b1, exactness);
-  Word b = carryStep(doubleToLong(u.y, midCarry), outCarry, b2, MUST_BE_EXACT);
-#if STATS
-  *carryMax = max(*carryMax, max(bound(midCarry), bound(*outCarry)));
-#endif
-  return (Word2) (a, b);
-}
-
-Word2 OVERLOAD carryPairMul(T2 u, iCARRY *outCarry, bool b1, bool b2, iCARRY inCarry, u32* carryMax, bool exactness) {
-  iCARRY midCarry;
-  Word a = carryStep(3 * doubleToLong(u.x, (iCARRY) 0) + inCarry, &midCarry, b1, exactness);
-  Word b = carryStep(3 * doubleToLong(u.y, (iCARRY) 0) + midCarry, outCarry, b2, MUST_BE_EXACT);
+  Word a = carryStep(doubleToLong(u.x, (iCARRY) 0) + inCarry, &midCarry, b1, exactness);
+  Word b = carryStep(doubleToLong(u.y, (iCARRY) 0) + midCarry, outCarry, b2, MUST_BE_EXACT);
 #if STATS
   *carryMax = max(*carryMax, max(bound(midCarry), bound(*outCarry)));
 #endif
@@ -564,6 +771,16 @@ Word2 OVERLOAD carryFinal(Word2 u, iCARRY inCarry, bool b1) {
 //== carries CARRY=32
 //== carries CARRY=64
 
+Word2 OVERLOAD carryPairMul(T2 u, i64 *outCarry, bool b1, bool b2, i64 inCarry, u32* carryMax, bool exactness) {
+  i64 midCarry;
+  Word a = carryStep(3 * doubleToLong(u.x, (i64) 0) + inCarry, &midCarry, b1, exactness);
+  Word b = carryStep(3 * doubleToLong(u.y, (i64) 0) + midCarry, outCarry, b2, MUST_BE_EXACT);
+#if STATS
+  *carryMax = max(*carryMax, max(bound(midCarry), bound(*outCarry)));
+#endif
+  return (Word2) (a, b);
+}
+
 // Carry propagation from word and carry.
 Word2 carryWord(Word2 a, CarryABM* carry, bool b1, bool b2) {
   a.x = carryStep(a.x + *carry, carry, b1, MUST_BE_EXACT);
@@ -572,26 +789,22 @@ Word2 carryWord(Word2 a, CarryABM* carry, bool b1, bool b2) {
 }
 
 // Propagate carry this many pairs of words.
-#define CARRY_LEN 16
+#define CARRY_LEN 8
 
-//
-// More miscellaneous macros
-//
-
-T2 addsub(T2 a) { return U2(a.x + a.y, a.x - a.y); }
-T2 addsub_m2(T2 a) { return U2(add1_m2(a.x, a.y), sub1_m2(a.x, a.y)); }
+T2 addsub(T2 a) { return U2(RE(a) + IM(a), RE(a) - IM(a)); }
+T2 addsub_m2(T2 a) { return U2(add1_m2(RE(a), IM(a)), sub1_m2(RE(a), IM(a))); }
 
 // computes 2*(a.x*b.x+a.y*b.y) + i*2*(a.x*b.y+a.y*b.x)
 T2 foo2(T2 a, T2 b) {
   a = addsub(a);
   b = addsub(b);
-  return addsub(U2(a.x * b.x, a.y * b.y));
+  return addsub(U2(RE(a) * RE(b), IM(a) * IM(b)));
 }
 
 T2 foo2_m2(T2 a, T2 b) {
   a = addsub(a);
   b = addsub(b);
-  return addsub_m2(U2(a.x * b.x, a.y * b.y));
+  return addsub_m2(U2(RE(a) * RE(b), IM(a) * IM(b)));
 }
 
 // computes 2*[x^2+y^2 + i*(2*x*y)]. Needs a name.
@@ -599,15 +812,15 @@ T2 foo(T2 a) { return foo2(a, a); }
 T2 foo_m2(T2 a) { return foo2_m2(a, a); }
 
 // Same as X2(a, b), b = mul_t4(b)
-#define X2_mul_t4(a, b) { T2 t = a; a = t + b; t.x = b.x - t.x; b.x = t.y - b.y; b.y = t.x; }
+#define X2_mul_t4(a, b) { T2 t = a; a = t + b; t.x = RE(b) - t.x; RE(b) = t.y - IM(b); IM(b) = t.x; }
 
 #define X2(a, b) { T2 t = a; a = t + b; b = t - b; }
 
 // Same as X2(a, conjugate(b))
-#define X2conjb(a, b) { T2 t = a; a.x = a.x + b.x; a.y = a.y - b.y; b.x = t.x - b.x; b.y = t.y + b.y; }
+#define X2conjb(a, b) { T2 t = a; RE(a) = RE(a) + RE(b); IM(a) = IM(a) - IM(b); RE(b) = t.x - RE(b); IM(b) = t.y + IM(b); }
 
 // Same as X2(a, b), a = conjugate(a)
-#define X2conja(a, b) { T2 t = a; a.x = a.x + b.x; a.y = -a.y - b.y; b = t - b; }
+#define X2conja(a, b) { T2 t = a; RE(a) = RE(a) + RE(b); IM(a) = -IM(a) - IM(b); b = t - b; }
 
 #define SWAP(a, b) { T2 t = a; a = b; b = t; }
 
@@ -615,9 +828,9 @@ T2 fmaT2(T a, T2 b, T2 c) { return a * b + c; }
 
 // Partial complex multiplies:  the mul by sin is delayed so that it can be later propagated to an FMA instruction
 // complex mul by cos-i*sin given cos/sin, sin
-T2 partial_cmul(T2 a, T c_over_s) { return U2(mad1(a.x, c_over_s, a.y), mad1(a.y, c_over_s, -a.x)); }
+T2 partial_cmul(T2 a, T c_over_s) { return U2(mad1(RE(a), c_over_s, IM(a)), mad1(IM(a), c_over_s, -RE(a))); }
 // complex mul by cos+i*sin given cos/sin, sin
-T2 partial_cmul_conjugate(T2 a, T c_over_s) { return U2(mad1(a.x, c_over_s, -a.y), mad1(a.y, c_over_s, a.x)); }
+T2 partial_cmul_conjugate(T2 a, T c_over_s) { return U2(mad1(RE(a), c_over_s, -IM(a)), mad1(IM(a), c_over_s, RE(a))); }
 
 // a = c + sin * d; b = c - sin * d;
 #define fma_addsub(a, b, sin, c, d) { d = sin * d; T2 t = c + d; b = c - d; a = t; }
@@ -626,11 +839,11 @@ T2 partial_cmul_conjugate(T2 a, T c_over_s) { return U2(mad1(a.x, c_over_s, -a.y
 
 // a * conjugate(b)
 // saves one negation
-T2 mul_by_conjugate(T2 a, T2 b) { return U2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y); }
+T2 mul_by_conjugate(T2 a, T2 b) { return U2(RE(a) * RE(b) + IM(a) * IM(b), IM(a) * RE(b) - RE(a) * IM(b)); }
 
 // Combined complex mul and mul by conjugate.  Saves 4 multiplies compared to two complex mul calls. 
 void mul_and_mul_by_conjugate(T2 *res1, T2 *res2, T2 a, T2 b) {
-	T axbx = a.x * b.x; T axby = a.x * b.y; T aybx = a.y * b.x; T ayby = a.y * b.y;
+	T axbx = RE(a) * RE(b); T axby = RE(a) * IM(b); T aybx = IM(a) * RE(b); T ayby = IM(a) * IM(b);
 	res1->x = axbx - ayby; res1->y = axby + aybx;		// Complex mul
 	res2->x = axbx + ayby; res2->y = aybx - axby;		// Complex mul by conjugate
 }
@@ -652,6 +865,10 @@ void fft4(T2 *u) {
   u[3] = t - u[3];
 }
 
+void fft2(T2* u) {
+  X2(u[0], u[1]);
+}
+
 #if !OLD_FFT8 && !NEWEST_FFT8 && !NEW_FFT8
 #define OLD_FFT8 1
 #endif
@@ -661,13 +878,13 @@ void fft4(T2 *u) {
 #if NEWEST_FFT8
 
 // Attempt to get more FMA by delaying mul by SQRT1_2
-T2 mul_t8_delayed(T2 a)  { return U2(a.y + a.x, a.y - a.x); }
-#define X2_mul_3t8_delayed(a, b) { T2 t = a; a = t + b; t = b - t; b.x = t.x - t.y; b.y = t.x + t.y; }
+T2 mul_t8_delayed(T2 a)  { return U2(IM(a) + RE(a), IM(a) - RE(a)); }
+#define X2_mul_3t8_delayed(a, b) { T2 t = a; a = t + b; t = b - t; RE(b) = t.x - t.y; IM(b) = t.x + t.y; }
 
 // Like X2 but second arg needs a multiplication by SQRT1_2
 #define X2_apply_SQRT1_2(a, b) { T2 t = a; \
-				 a.x = fma(b.x, M_SQRT1_2, t.x); a.y = fma(b.y, M_SQRT1_2, t.y); \
-				 b.x = fma(b.x, -M_SQRT1_2, t.x); b.y = fma(b.y, -M_SQRT1_2, t.y); }
+				 RE(a) = fma(RE(b), M_SQRT1_2, t.x); IM(a) = fma(IM(b), M_SQRT1_2, t.y); \
+				 RE(b) = fma(RE(b), -M_SQRT1_2, t.x); IM(b) = fma(IM(b), -M_SQRT1_2, t.y); }
 
 void fft4Core_delayed(T2 *u) {		// Same as fft4Core except u[1] and u[3] need to be multiplied by SQRT1_2
   X2(u[0], u[2]);
@@ -692,7 +909,7 @@ void fft8Core(T2 *u) {
 
 // Same as X2(a, b), b = mul_3t8(b)
 //#define X2_mul_3t8(a, b) { T2 t=a; a = t+b; t = b-t; t.y *= M_SQRT1_2; b.x = t.x * M_SQRT1_2 - t.y; b.y = t.x * M_SQRT1_2 + t.y; }
-#define X2_mul_3t8(a, b) { T2 t=a; a = t+b; t = b-t; b.x = (t.x - t.y) * M_SQRT1_2; b.y = (t.x + t.y) * M_SQRT1_2; }
+#define X2_mul_3t8(a, b) { T2 t=a; a = t+b; t = b-t; RE(b) = (t.x - t.y) * M_SQRT1_2; IM(b) = (t.x + t.y) * M_SQRT1_2; }
 
 void fft8Core(T2 *u) {
   X2(u[0], u[4]);
@@ -1655,23 +1872,7 @@ void fft15(T2 *u) {
   u[3] = tmp;
 }
 
-
 void shufl(u32 WG, local T2 *lds2, T2 *u, u32 n, u32 f) {
-  u32 me = get_local_id(0);
-  u32 m = me / f;
-    
-  local T* lds = (local T*) lds2;
-
-  for (u32 i = 0; i < n; ++i) { lds[(m + i * WG / f) / n * f + m % n * WG + me % f] = u[i].x; }
-  bar();
-  for (u32 i = 0; i < n; ++i) { u[i].x = lds[i * WG + me]; }
-  bar();
-  for (u32 i = 0; i < n; ++i) { lds[(m + i * WG / f) / n * f + m % n * WG + me % f] = u[i].y; }
-  bar();
-  for (u32 i = 0; i < n; ++i) { u[i].y = lds[i * WG + me]; }
-}
-
-void shufl2(u32 WG, local T2 *lds2, T2 *u, u32 n, u32 f) {
   u32 me = get_local_id(0);
   local T* lds = (local T*) lds2;
 
@@ -1687,117 +1888,98 @@ void shufl2(u32 WG, local T2 *lds2, T2 *u, u32 n, u32 f) {
   for (u32 i = 0; i < n; ++i) { u[i].y = lds[i * WG + me]; }
 }
 
-void tabMul(u32 WG, const global T2 *trig, T2 *u, u32 n, u32 f) {
+typedef constant const T2* Trig;
+
+void tabMul(u32 WG, Trig trig, T2 *u, u32 n, u32 f) {
   u32 me = get_local_id(0);
-  for (i32 i = 1; i < n; ++i) { u[i] = mul(u[i], trig[me / f + i * (WG / f)]); }
+  
+  for (u32 i = 1; i < n; ++i) {
+    u[i] = mul(u[i], trig[(me & ~(f-1)) + (i - 1) * WG]);
+  }
 }
 
-void tabMul2(u32 WG, const global T2 *trig, T2 *u, u32 n, u32 f) {
-  u32 me = get_local_id(0);
-  u32 mask = f - 1;
-  for (i32 i = 0; i < n - 1; ++i) { u[i + 1] = mul(u[i + 1], trig[WG + (me & ~mask) + i * WG]); }
-}
-
-void shuflAndMul(u32 WG, local T2 *lds, const global T2 *trig, T2 *u, u32 n, u32 f) {
+void shuflAndMul(u32 WG, local T2 *lds, Trig trig, T2 *u, u32 n, u32 f) {
+  tabMul(WG, trig, u, n, f);
   shufl(WG, lds, u, n, f);
-  tabMul(WG, trig, u, n, f);
-}
-
-void shuflAndMul2(u32 WG, local T2 *lds, const global T2 *trig, T2 *u, u32 n, u32 f) {
-  tabMul(WG, trig, u, n, f);
-  shufl2(WG, lds, u, n, f);
 }
 
 // 64x4
-void fft256w(local T2 *lds, T2 *u, const global T2 *trig) {
+void fft256w(local T2 *lds, T2 *u, Trig trig) {
   UNROLL_WIDTH_CONTROL
-  for (i32 s = 4; s >= 0; s -= 2) {
-    if (s != 4) { bar(); }
+  for (u32 s = 0; s <= 4; s += 2) {
+    if (s) { bar(); }
     fft4(u);
-    shuflAndMul(64, lds, trig, u, 4, 1 << s);
+    shuflAndMul(64, lds, trig, u, 4, 1u << s);
   }
   fft4(u);
 }
 
-void fft256h(local T2 *lds, T2 *u, const global T2 *trig) {
-  u32 me = get_local_id(0);
-  fft4(u);
-  for (int i = 0; i < 3; ++i) { u[1 + i] = mul(u[1 + i], trig[64 + 64 * i + me]); }
-  shufl2(64, lds,  u, 4, 1);
-  bar();
-  fft4(u);
-  shuflAndMul2(64, lds, trig, u, 4, 4);
-  bar();
-  fft4(u);
-  shuflAndMul2(64, lds, trig, u, 4, 16);
+void fft256h(local T2 *lds, T2 *u, Trig trig) {
+  for (u32 s = 0; s <= 4; s += 2) {
+    if (s) { bar(); }
+    fft4(u);
+    shuflAndMul(64, lds, trig, u, 4, 1u << s);
+  }
   fft4(u);
 }
 
 // 64x8
-void fft512w(local T2 *lds, T2 *u, const global T2 *trig) {
+void fft512w(local T2 *lds, T2 *u, Trig trig) {
   UNROLL_WIDTH_CONTROL
-  for (i32 s = 3; s >= 0; s -= 3) {
-    if (s != 3) { bar(); }
+  for (u32 s = 0; s <= 3; s += 3) {
+    if (s) { bar(); }
     fft8(u);
-    shuflAndMul(64, lds, trig, u, 8, 1 << s);
+    shuflAndMul(64, lds, trig, u, 8, 1u << s);
   }
   fft8(u);
 }
 
-void fft512h(local T2 *lds, T2 *u, const global T2 *trig) {
-  fft8(u);
-  shuflAndMul(64, lds, trig, u, 8, 8);
-  bar();
-  fft8(u);
-  shuflAndMul(64, lds, trig, u, 8, 1);
+void fft512h(local T2 *lds, T2 *u, Trig trig) {
+  for (u32 s = 0; s <= 3; s += 3) {
+    if (s) { bar(); }
+    fft8(u);
+    shuflAndMul(64, lds, trig, u, 8, 1u << s);
+  }
   fft8(u);
 }
 
 // 256x4
-void fft1Kw(local T2 *lds, T2 *u, const global T2 *trig) {
+void fft1Kw(local T2 *lds, T2 *u, Trig trig) {
   UNROLL_WIDTH_CONTROL
   for (i32 s = 0; s <= 6; s += 2) {
     if (s) { bar(); }
     fft4(u);
-    shuflAndMul2(256, lds, trig, u, 4, 1 << s);
+    shuflAndMul(256, lds, trig, u, 4, 1u << s);
   }
   fft4(u);
 }
 
-void fft1Kh(local T2 *lds, T2 *u, const global T2 *trig) {
-  fft4(u);
-  shuflAndMul(256, lds, trig, u, 4, 64);
-  fft4(u);
-  bar();
-  shuflAndMul(256, lds, trig, u, 4, 16);
-  fft4(u);
-  bar();
-  shuflAndMul(256, lds, trig, u, 4, 4);
-  fft4(u);
-  bar();
-  shuflAndMul(256, lds, trig, u, 4, 1);
+void fft1Kh(local T2 *lds, T2 *u, Trig trig) {
+  for (i32 s = 0; s <= 6; s += 2) {
+    if (s) { bar(); }
+    fft4(u);
+    shuflAndMul(256, lds, trig, u, 4, 1u << s);
+  }
   fft4(u);
 }
 
 // 512x8
-void fft4Kw(local T2 *lds, T2 *u, const global T2 *trig) {
+void fft4Kw(local T2 *lds, T2 *u, Trig trig) {
   UNROLL_WIDTH_CONTROL
-  for (i32 s = 6; s >= 0; s -= 3) {
-    if (s != 6) { bar(); }
+  for (u32 s = 0; s <= 6; s += 3) {
+    if (s) { bar(); }
     fft8(u);
-    shuflAndMul(512, lds, trig, u, 8, 1 << s);
+    shuflAndMul(512, lds, trig, u, 8, 1u << s);
   }
   fft8(u);
 }
-void fft4Kh(local T2 *lds, T2 *u, const global T2 *trig) {
-  fft8(u);
-  shuflAndMul(512, lds, trig, u, 8, 64);
-  fft8(u);
-  bar();
-  shuflAndMul(512, lds, trig, u, 8, 8);
-  fft8(u);
-  bar();
-  shuflAndMul(512, lds, trig, u, 8, 1);
+
+void fft4Kh(local T2 *lds, T2 *u, Trig trig) {
+  for (u32 s = 0; s <= 6; s += 3) {
+    if (s) { bar(); }
+    fft8(u);
+    shuflAndMul(512, lds, trig, u, 8, 1u << s);
+  }
   fft8(u);
 }
 
@@ -1816,47 +1998,6 @@ void readDelta(u32 WG, u32 N, T2 *u, const global T2 *a, const global T2 *b, u32
   }
 }
 
-double2 openclSlowTrig(i32 k, i32 n) {
-  double c;
-  double s = sincos(M_PI / n * k, &c);
-  return U2(c, -s);
-}
-
-#if ROCM_SLOWTRIG
-// ROCm OCML sin/cos which expect reduced argument.
-// These are faster than openclSlowTrig() because they skip the argument reduction.
-struct scret { double s; double c; };
-extern struct scret __ocmlpriv_sincosred2_f64(double x, double y);
-extern struct scret __ocmlpriv_sincosred_f64(double x);
-double2 ocmlCosSin(double x) {
-  // This has very similar accuracy and performance to our kCosSin(), and is affected by the same "mistify" bug.
-  // struct scret r = __ocmlpriv_sincosred2_f64(x, 0);
-  struct scret r = __ocmlpriv_sincosred_f64(x);
-  return U2(r.c, r.s);
-}
-#endif
-
-
-
-// Crappy little routine to centralize the workaround to a ROCM 3.1 optimizer bug
-
-double internal_kcos(double x, double z, double C0, const double C1, const double C2, const double C3, const double C4, const double C5, const double C6) {
-  double r = (((((C6 * z + C5) * z + C4) * z + C3) * z + C2) * z + C1) * z + C0;
-#if WORKAROUND
-  // The condition below is never hit,
-  // it is here just to workaround a ROCm 3.1 maddening codegen bug.
-  if (as_int2(x).y == -1) { return x; }  
-#endif
-#if HAS_ASM
-  // the raw v_fma_f64 below seems to improve VGPR allocation on ROCm 3.3.0
-  double out;
-  __asm("v_fma_f64 %0, %1, %2, 1.0" : "=v"(out) : "v"(r), "v"(z));
-  return out;
-#else
-  return r * z + 1;
-#endif
-}
-
 #if ULTRA_TRIG
 
 // These are ultra accurate routines.  We modified Ernst's qfcheb program and selected a multiplier such that
@@ -1867,238 +2008,57 @@ double internal_kcos(double x, double z, double C0, const double C1, const doubl
 
 #if MIDDLE <= 4 || MIDDLE == 6 || MIDDLE == 8 || MIDDLE == 12
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 237.0,
-  S0 = 1.325566520502022459314555213709951536931E-2,
-  S1 = -3.881980322681974392559426158793087648153E-7,
-  S2 = 3.410565443360642222391010526688094345781E-12,
-  S3 = -1.426856013978167821403568696371527705655E-17,
-  S4 = 3.482175175702066575984872170356555509080E-23,
-  S5 = -5.562076448925268647148782667169020676259E-29,
-  S6 = 6.201163522609890673061715308768999454610E-35;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
-
-double kcospi(double k, double n) {
-  const double multiplier = 237.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -8.785633001379193589526844702043122509847E-5,
-  C1 = 1.286455787248713040382538175061927139984E-9,
-  C2 = -7.534885612829989493540399241312576130893E-15,
-  C3 = 2.364240701948887617426067478686109151734E-20,
-  C4 = -4.615854784766675986940567196848517238962E-26,
-  C5 = 6.144080827417059071970326571730045899816E-32,
-  C6 = -5.871465775800262490003096772250454332761E-38;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+#define SIN_COEFS {0.013255665205020225,-3.8819803226819742e-07,3.4105654433606424e-12,-1.4268560139781677e-17,3.4821751757020666e-23,-5.5620764489252689e-29,6.2011635226098908e-35, 237}
+#define COS_COEFS {-8.7856330013791936e-05,1.2864557872487131e-09,-7.5348856128299892e-15,2.3642407019488875e-20,-4.6158547847666762e-26,6.1440808274170587e-32,-5.8714657758002626e-38, 237}
 
 #elif MIDDLE == 11
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 539.0,
-  S0 = 5.828557798867890962106671347852646585212E-3,
-  S1 = -3.300137781417411531540293347302792710111E-8,
-  S2 = 5.605628228532181378177505648548736745005E-14,
-  S3 = -4.534163910132042597715347205657402108321E-20,
-  S4 = 2.139374635723981645104361937982862431407E-26,
-  S5 = -6.606817992842764145822571551568922079087E-33,
-  S6 = 1.424123767080045593573893583992121444025E-39;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
+#define SIN_COEFS {0.0058285577988678909,-3.3001377814174114e-08,5.6056282285321817e-14,-4.5341639101320423e-20,2.1393746357239815e-26,-6.6068179928427645e-33,1.4241237670800455e-39, 49*11}
 
-double kcospi(double k, double n) {
-  const double multiplier = 539.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -1.698604300737185693048465825427633266769E-5,
-  C1 = 4.808760950804748019121160356966644623911E-11,
-  C2 = -5.445454688158452834881141960218009821120E-17,
-  C3 = 3.303454552210884737625467277247980235463E-23,
-  C4 = -1.246946859168030175920542131923003412512E-29,
-  C5 = 3.209016057314560700103210242948787629348E-36,
-  C6 = -5.928989282444938427562078649290929437781E-43;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+// {0.005492294848933205,-2.761278944626038e-08,4.1647407612374865e-14,-2.9912063263788177e-20,1.2532031863362935e-26,-3.4364949357849832e-33,6.5816772637974481e-40, 143 * 4};
+
+#define COS_COEFS {-1.6986043007371857e-05,4.8087609508047477e-11,-5.4454546881584527e-17,3.3034545522108849e-23,-1.2469468591680302e-29,3.2090160573145604e-36,-5.9289892824449386e-43, 49*11}
+
+// {-1.5082651353809108e-05,3.7914395310092582e-11,-3.8123307049954028e-17,2.0535733847563737e-23,-6.8829596395036851e-30,1.5727926864212422e-36,-2.5737325744028274e-43, 143 * 4};
 
 // This should be the best choice for MIDDLE=11.  For reasons I cannot explain, the Sun coefficients beat this
 // code.  We know this code works as it gives great results for MIDDLE=5 and MIDDLEE=10.
 #elif MIDDLE == 5 || MIDDLE == 10 || MIDDLE == 11
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 935.0,
-  S0 = 3.359992142876784201685022306409177725743E-3,
-  S1 = -6.322131648214566240979995473508278740838E-9,
-  S2 = 3.568700182412300594922117535549453349134E-15,
-  S3 = -9.592621220743218859188828943012321657143E-22,
-  S4 = 1.504115654636920482511097706291165478487E-28,
-  S5 = -1.543622286925744278152254064494080552013E-35,
-  S6 = 1.105734195160535436277498021504043747290E-42;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
-
-double kcospi(double k, double n) {
-  const double multiplier = 935.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -5.644773600096862074753448369344907563149E-6,
-  C1 = 5.310578166058387650603356635481169158812E-12,
-  C2 = -1.998467428863824077287054491897967126953E-18,
-  C3 = 4.028891491097491801975430166858494454344E-25,
-  C4 = -5.053816730462908034014422555093418935881E-32,
-  C5 = 4.322129170492321319484123344308625661310E-39,
-  C6 = -2.653755001540736767899877604062356879092E-46;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+#define SIN_COEFS {0.0033599921428767842,-6.3221316482145663e-09,3.5687001824123009e-15,-9.5926212207432193e-22,1.5041156546369205e-28,-1.5436222869257443e-35,1.1057341951605355e-42, 85 * 11}
+#define COS_COEFS {-5.6447736000968621e-06,5.3105781660583875e-12,-1.9984674288638241e-18,4.0288914910974918e-25,-5.0538167304629085e-32,4.3221291704923216e-39,-2.6537550015407366e-46, 85 * 11}
 
 #elif MIDDLE == 7 || MIDDLE == 14
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 1043.0,
-  S0 = 3.012073493374681906592038213319818382791E-3,
-  S1 = -4.554549667373454484118965385271077510052E-9,
-  S2 = 2.066077343547647155425316306036265959843E-15,
-  S3 = -4.463015685066233648828620325094686456434E-22,
-  S4 = 5.623762265485488284324269237766831663603E-29,
-  S5 = -4.638113447715051799380265707890692020682E-36,
-  S6 = 2.669965639105020177304365715995828727563E-43;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
+#define SIN_COEFS {0.0030120734933746819,-4.5545496673734544e-09,2.066077343547647e-15,-4.4630156850662332e-22,5.6237622654854882e-29,-4.6381134477150518e-36,2.6699656391050201e-43, 149 * 7}
 
-double kcospi(double k, double n) {
-  const double multiplier = 1043.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -4.536293364745179935176052375550823743968E-6,
-  C1 = 3.429659581838506796461487812352703967505E-12,
-  C2 = -1.037196133626512841792809974516402146359E-18,
-  C3 = 1.680366405557052447567491325381242290412E-25,
-  C4 = -1.693918508165098205043530180241447147489E-32,
-  C5 = 1.164194039285697587121448734875988367798E-39,
-  C6 = -5.744378657071286229592196711808608232758E-47;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+#define COS_COEFS {-4.5362933647451799e-06,3.4296595818385068e-12,-1.0371961336265129e-18,1.6803664055570525e-25,-1.6939185081650983e-32,1.1641940392856976e-39,-5.7443786570712859e-47, 149 * 7}
 
 #elif MIDDLE == 9
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 981.0,
-  S0 = 3.202438994485008387946478956669279224093E-3,
-  S1 = -5.473830505425255234619247376514291694548E-9,
-  S2 = 2.806875052453204149514320566066822784590E-15,
-  S3 = -6.853864598534613743118360049991491957638E-22,
-  S4 = 9.762581282319523093974361997952150328213E-29,
-  S5 = -9.101430953568596716259191049990613857680E-36,
-  S6 = 5.922493406424074785215515667593752685075E-43;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
-
-double kcospi(double k, double n) {
-  const double multiplier = 981.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -5.127807756699075759825401695092101356307E-6,
-  C1 = 4.382402064943845530239958152571810850923E-12,
-  C2 = -1.498141020103216184377101881256929587994E-18,
-  C3 = 2.743635406444754407232944627368393860182E-25,
-  C4 = -3.126407066924338126563165160393687605755E-32,
-  C5 = 2.428896359303454357272837966136800881482E-39,
-  C6 = -1.354744119588740776724212453287202037305E-46;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+#define SIN_COEFS {0.0032024389944850084,-5.4738305054252556e-09,2.8068750524532041e-15,-6.8538645985346134e-22,9.7625812823195236e-29,-9.1014309535685973e-36,5.9224934064240749e-43, 109*9}
+#define COS_COEFS {-5.1278077566990758e-06,4.3824020649438457e-12,-1.4981410201032161e-18,2.7436354064447543e-25,-3.1264070669243379e-32,2.4288963593034543e-39,-1.3547441195887408e-46,109*9}
 
 #elif MIDDLE == 13
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 923.0,
-  S0 = 3.403675681029028416658175359146907710509E-3,
-  S1 = -6.571935079363972457955630336200617293561E-9,
-  S2 = 3.806796070028338149229279388481272072627E-15,
-  S3 = -1.050041986590861856087113520034519750880E-21,
-  S4 = 1.689547554183218061124244760815615740737E-28,
-  S5 = -1.779303563885440884174553907658593820872E-35,
-  S6 = 1.307915144322256815583011923237009760880E-42;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
-
-double kcospi(double k, double n) {
-  const double multiplier = 923.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -5.792504070814210159885780858135579575118E-6,
-  C1 = 5.592183901733170753783845770538338625048E-12,
-  C2 = -2.159516534364428504895010735856121267620E-18,
-  C3 = 4.467502966925446535115481019961481417179E-25,
-  C4 = -5.750671863975031333900672672679951208984E-32,
-  C5 = 5.046806574658059441221620787550422493234E-39,
-  C6 = -3.179798232062197939290472157402348930741E-46;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+#define SIN_COEFS {0.0034036756810290284,-6.5719350793639721e-09,3.8067960700283384e-15,-1.0500419865908618e-21,1.6895475541832181e-28,-1.779303563885441e-35,1.3079151443222568e-42, 71*13}
+#define COS_COEFS {-5.7925040708142102e-06,5.5921839017331711e-12,-2.1595165343644285e-18,4.4675029669254463e-25,-5.7506718639750315e-32,5.0468065746580596e-39,-3.1797982320621979e-46, 71*13}
 
 #elif MIDDLE == 15
 
-double ksinpi(double k, const double n) {
-  const double multiplier = 975.0,
-  S0 = 3.222146311374146901103072673325722946853E-3,
-  S1 = -5.575508992450936287761440258986348934202E-9,
-  S2 = 2.894309958717768308134445890908542332781E-15,
-  S3 = -7.154614893348014483717812998123625991310E-22,
-  S4 = 1.031678043691607404439682102496944831882E-28,
-  S5 = -9.736838961591582918655541750116575020564E-36,
-  S6 = 6.414187893489001604271672397223891418084E-43;
-  double x = k * (multiplier / n);
-  double z = x * x;
-  double r = fma(fma(fma(fma(fma(S6, z, S5), z, S4), z, S3), z, S2), z, S1) * (z * x);
-  return forced_fma_by_const(x, S0, r);
-}
-
-double kcospi(double k, double n) {
-  const double multiplier = 975.0,
-//C00 = +9.99999999999999999969670443201471068399669429945726867342133369e-01,
-  C0 = -5.191113425951010385063861565486451746842E-6,
-  C1 = 4.491276433514783045963366136861124931294E-12,
-  C2 = -1.554315026241961583726723552729380565810E-18,
-  C3 = 2.881651998263536726141085786655261845469E-25,
-  C4 = -3.324217569398092725646230913789448367578E-32,
-  C5 = 2.614458087868421285302095471981686976401E-39,
-  C6 = -1.476246082455034225017096329476943879497E-46;
-  double x = k * (multiplier / n);
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, C0), z, 1.0);
-  return internal_kcos(x, z, C0, C1, C2, C3, C4, C5, C6);
-}
+#define SIN_COEFS {0.0032221463113741469,-5.5755089924509359e-09,2.8943099587177684e-15,-7.1546148933480147e-22,1.0316780436916074e-28,-9.7368389615915834e-36,6.4141878934890016e-43, 65*15}
+#define COS_COEFS {-5.1911134259510105e-06,4.4912764335147829e-12,-1.5543150262419615e-18,2.8816519982635366e-25,-3.3242175693980929e-32,2.6144580878684214e-39,-1.4762460824550342e-46, 65*15}
 
 #endif
+
+double ksinpi(u32 k, u32 n) {
+  const double S[] = SIN_COEFS;
+  
+  double x = S[7] / n * k;
+  double z = x * x;
+  double r = fma(fma(fma(fma(fma(S[6], z, S[5]), z, S[4]), z, S[3]), z, S[2]), z, S[1]) * (z * x);
+  return fma(x, S[0], r);
+}
 
 #else
 
@@ -2112,98 +2072,220 @@ double kcospi(double k, double n) {
  * is preserved.
  * ====================================================
  */
-double ksinpi(double k, const double n) {
+
+// Coefficients from http://www.netlib.org/fdlibm/k_cos.c
+#define COS_COEFS {-0.5,0.041666666666666602,-0.001388888888887411,2.4801587289476729e-05,-2.7557314351390663e-07,2.0875723212981748e-09,-1.1359647557788195e-11, M_PI}
+
+// Experimental: const double C[] = {-0.5,0.041666666666665589,-0.0013888888888779014,2.4801587246942509e-05,-2.7557304501248813e-07,2.0874583610048953e-09,-1.1307548621486489e-11, M_PI};
+
+double ksinpi(u32 k, u32 n) {
+  // const double S[] = {-0.16666666666666455,0.0083333333332988729,-0.00019841269816529426,2.7557310051600518e-06,-2.5050279451232251e-08,1.5872611854244144e-10};
+
   // Coefficients from http://www.netlib.org/fdlibm/k_sin.c
-  // Excellent accuracy in [-pi/4, pi/4]
-  const double
-  S1 = -0x1.5555555555555p-3,  // -1.66666666666666657415e-01 bfc55555'55555555
-  S2 = +0x1.1111111110bb3p-7,  // +8.33333333333094970763e-03 3f811111'11110bb3
-  S3 = -0x1.a01a019e83e5cp-13, // -1.98412698367611268872e-04 bf2a01a0'19e83e5c
-  S4 = +0x1.71de3796cde01p-19, // +2.75573161037288024585e-06 3ec71de3'796cde01
-  S5 = -0x1.ae600b42fdfa7p-26, // -2.50511320680216983368e-08 be5ae600'b42fdfa7
-  S6 = +0x1.5e0b2f9a43bb8p-33; // +1.59181443044859141215e-10 3de5e0b2'f9a43bb8
-  double x = k * M_PI / n;
+  const double S[] = {1, -0.16666666666666666,0.0083333333333309497,-0.00019841269836761127,2.7557316103728802e-06,-2.5051132068021698e-08,1.5918144304485914e-10, M_PI};
+  
+  double x = S[7] / n * k;
   double z = x * x;
-  return (((((S6 * z + S5) * z + S4) * z + S3) * z + S2) * z + S1) * z * x + x;
-}
-
-double kcospi(double k, double n) {
-  // Coefficients from http://www.netlib.org/fdlibm/k_cos.c
-  const double 
-  C1  =  4.16666666666666019037e-02, /* 0x3FA55555, 0x5555554C */
-  C2  = -1.38888888888741095749e-03, /* 0xBF56C16C, 0x16C15177 */
-  C3  =  2.48015872894767294178e-05, /* 0x3EFA01A0, 0x19CB1590 */
-  C4  = -2.75573143513906633035e-07, /* 0xBE927E4F, 0x809C52AD */
-  C5  =  2.08757232129817482790e-09, /* 0x3E21EE9E, 0xBDB4B1C4 */
-  C6  = -1.13596475577881948265e-11; /* 0xBDA8FAE9, 0xBE8838D4 */
-  double x = k * M_PI / n;
-  double z = x * x;
-//  return fma(fma(fma(fma(fma(fma(fma(C6, z, C5), z, C4), z, C3), z, C2), z, C1), z, -0.5), z, 1.0);
-  return internal_kcos(x, z, -0.5, C1, C2, C3, C4, C5, C6);
+  // Special-case based on S[0]==1:
+  return fma(fma(fma(fma(fma(fma(S[6], z, S[5]), z, S[4]), z, S[3]), z, S[2]), z, S[1]), z * x, x);
 }
 
 #endif
 
-double2 reducedCosSin(i32 k, i32 n) {
-  assert(k <= n / 4);
-#if ROCM_SLOWTRIG
-  return ocmlCosSin((double)k * (M_PI / (double)n));
-#else
-  return U2(kcospi((double)k, (double)n), ksinpi((double)k, (double)n));
-#endif
+double kcospi(u32 k, u32 n) {
+  const double C[] = COS_COEFS;
+  double x = C[7] / n * k;
+  double z = x * x;
+  return fma(fma(fma(fma(fma(fma(fma(C[6], z, C[5]), z, C[4]), z, C[3]), z, C[2]), z, C[1]), z, C[0]), z, 1);
 }
 
-// Returns e^(-i * pi * k/n)
-double2 slowTrig(i32 k, i32 n, i32 kBound) {
-  assert(n % 4 == 0);
-  assert(k >= 0);
-  assert(k < kBound);           // kBound actually bounds k
-  assert(kBound <= 4 * n);      // angle <= 4*pi
+// N represents a full circle, so N/2 is pi radians and N/8 is pi/4 radians.
+double2 reducedCosSin(u32 k, u32 N) {
+  assert(k <= N/8);
+  return U2(kcospi(k, N/2), -ksinpi(k, N/2));
+}
 
-#if ORIG_SLOWTRIG
-  return openclSlowTrig(k, n);
-#else
+#if SP
 
-  if (kBound > 2 * n && k >= 2 * n) { k -= 2 * n; }
-  assert(k < 2 * n);
+global float4 SP_TRIG_2SH[2 * SMALL_HEIGHT / 8 + 1];
+global float4 SP_TRIG_BH[BIG_HEIGHT / 8 + 1];
+global float4 SP_TRIG_N[ND / 8 + 1];
 
-  bool negate = kBound > n && k >= n;
-  if (negate) { k -= n; }
+#endif
+
+global double2 TRIG_2SH[SMALL_HEIGHT / 4 + 1];
+global double2 TRIG_BH[BIG_HEIGHT / 8 + 1];
+
+#if TRIG_COMPUTE == 0
+global double2 TRIG_N[ND / 8 + 1];
+#elif TRIG_COMPUTE == 1
+global double2 TRIG_W[WIDTH / 2 + 1];
+#endif
+
+TT THREAD_WEIGHTS[G_W];
+TT CARRY_WEIGHTS[BIG_HEIGHT / CARRY_LEN];
+
+double2 tableTrig(u32 k, u32 n, u32 kBound, global double2* trigTable) {
+  assert(n % 8 == 0);
+  assert(k < kBound);       // kBound actually bounds k
+  assert(kBound <= 2 * n);  // angle <= 2 tau
+
+  if (kBound > n && k >= n) { k -= n; }
+  assert(k < n);
+
+  bool negate = kBound > n/2 && k >= n/2;
+  if (negate) { k -= n/2; }
   
-  bool negateCos = kBound > n / 2 && k >= n / 2;
-  if (negateCos) { k = n - k; }
+  bool negateCos = kBound > n / 4 && k >= n / 4;
+  if (negateCos) { k = n/2 - k; }
   
-  bool flip = kBound > n / 4 && k > n / 4;
-  if (flip) { k = n / 2 - k; }
+  bool flip = kBound > n / 8 + 1 && k > n / 8;
+  if (flip) { k = n / 4 - k; }
 
-  assert(k <= n / 4);
-  double2 r = reducedCosSin(k, n);
+  assert(k <= n / 8);
 
-  if (flip) { r = swap(r); }
+  double2 r = trigTable[k];
+
+  if (flip) { r = -swap(r); }
   if (negateCos) { r.x = -r.x; }
   if (negate) { r = -r; }
-  return U2(r.x, -r.y);  
+  return r;
+}
+
+float fastSinSP(u32 k, u32 tau, u32 M) {
+  // These DP coefs are optimized for computing sin(2*pi*x) with x in [0, 1/8], using
+  // sin(2*pi*x) = R[0]*x + R[1]*x^3 + R[2]*x^5 + R[3]*x^7
+  double R[4] = {6.2831852886262363, -41.341663358481057, 81.592672353579971, -75.407767034374388};
+
+  // We divide the DP coefficients by the corresponding power of M, and *afterwards* truncate them to SP.
+  // These constants are all computed compile-time.
+  float S[4] = {
+      R[0] / M,
+      R[1] / (((double)M)*M*M),
+      R[2] / (((double)M)*M*M*M*M),
+      R[3] / (((double)M)*M*M*M*M*M*M)
+      };
+
+  // Because we took the M out, we can scale k with a power of two, i.e. without loss of precision.
+  assert(tau % M == 0);
+  assert(((tau / M) & (tau / M - 1)) == 0); // (tau/M is a power of 2)
+  float x = (-(float)k) / (tau / M);
+  float z = x * x;
+  return fma(x, S[0], fma(fma(S[3], z, S[2]), z, S[1]) * x * z); // 1ulp on [0, 1/8].
+
+  // sinpi() does argument reduction and a bunch of unnecessary stuff.
+  // return sinpi(2 * x);
+}
+
+float fasterSinSP(u32 k, u32 tau, u32 M) {
+#if HAS_ASM
+  float x = (-1.0f / tau) * k;  
+  float out;
+  //v_sin_f32 has 10upls error on [0, pi/4] (R7)
+  __asm("v_sin_f32_e32 %0, %1" : "=v"(out) : "v" (x));
+  return out;  
+#else
+  return fastSinSP(k, tau, M);
 #endif
 }
 
-// transpose LDS 64 x 64.
-void transposeLDS(local T *lds, T2 *u) {
-  u32 me = get_local_id(0);
-  for (i32 b = 0; b < 2; ++b) {
-    if (b) { bar(); }
-    for (i32 i = 0; i < 16; ++i) {
-      u32 l = i * 4 + me / 64;
-      lds[l * 64 + (me + l) % 64 ] = ((T *)(u + i))[b];
-    }
-    bar();
-    for (i32 i = 0; i < 16; ++i) {
-      u32 c = i * 4 + me / 64;
-      u32 l = me % 64;
-      ((T *)(u + i))[b] = lds[l * 64 + (c + l) % 64];
-    }
-  }
+float fastCosSP(u32 k, u32 tau) {
+  float x = (-1.0f / tau) * k;
+  
+#if HAS_ASM
+  // On our intended range, [0, pi/4], v_cos_f32 seems to have 2ulps precision which is good enough.
+  float out;
+  __asm("v_cos_f32_e32 %0, %1" : "=v"(out) : "v" (x));
+  return out;  
+#else
+  return cospi(2 * x);
+#endif
 }
 
+
+#define KERNEL(x) kernel __attribute__((reqd_work_group_size(x, 1, 1))) void
+
+KERNEL(64) writeGlobals(global double2* trig2ShDP, global double2* trigBhDP, global double2* trigNDP,
+                        global double2* trigW,
+                        global double2* threadWeights, global double2* carryWeights
+                        ) {
+#if SP
+  for (u32 k = get_global_id(0); k < 2 * SMALL_HEIGHT/8 + 1; k += get_global_size(0)) { SP_TRIG_2SH[k] = trig2ShSP[k]; }
+  for (u32 k = get_global_id(0); k < BIG_HEIGHT/8 + 1; k += get_global_size(0)) { SP_TRIG_BH[k] = trigBhSP[k]; }
+  for (u32 k = get_global_id(0); k < ND/8 + 1; k += get_global_size(0)) { SP_TRIG_N[k] = trigNSP[k]; }
+#endif
+
+  for (u32 k = get_global_id(0); k < 2 * SMALL_HEIGHT/8 + 1; k += get_global_size(0)) { TRIG_2SH[k] = trig2ShDP[k]; }
+  for (u32 k = get_global_id(0); k < BIG_HEIGHT/8 + 1; k += get_global_size(0)) { TRIG_BH[k] = trigBhDP[k]; }
+
+#if TRIG_COMPUTE == 0
+  for (u32 k = get_global_id(0); k < ND/8 + 1; k += get_global_size(0)) { TRIG_N[k] = trigNDP[k]; }
+#elif TRIG_COMPUTE == 1
+  for (u32 k = get_global_id(0); k <= WIDTH/2; k += get_global_size(0)) { TRIG_W[k] = trigW[k]; }
+#endif
+
+  // Weights
+  for (u32 k = get_global_id(0); k < G_W; k += get_global_size(0)) { THREAD_WEIGHTS[k] = threadWeights[k]; }
+  for (u32 k = get_global_id(0); k < BIG_HEIGHT / CARRY_LEN; k += get_global_size(0)) { CARRY_WEIGHTS[k] = carryWeights[k]; }  
+}
+
+double2 slowTrig_2SH(u32 k, u32 kBound) { return tableTrig(k, 2 * SMALL_HEIGHT, kBound, TRIG_2SH); }
+double2 slowTrig_BH(u32 k, u32 kBound)  { return tableTrig(k, BIG_HEIGHT, kBound, TRIG_BH); }
+
+// Returns e^(-i * tau * k / n), (tau == 2*pi represents a full circle). So k/n is the ratio of a full circle.
+// Inverse trigonometric direction is chosen as an FFT convention.
+double2 slowTrig_N(u32 k, u32 kBound)   {
+  u32 n = ND;
+  assert(n % 8 == 0);
+  assert(k < kBound);       // kBound actually bounds k
+  assert(kBound <= 2 * n);  // angle <= 2 tau
+
+  if (kBound > n && k >= n) { k -= n; }
+  assert(k < n);
+
+  bool negate = kBound > n/2 && k >= n/2;
+  if (negate) { k -= n/2; }
+  
+  bool negateCos = kBound > n / 4 && k >= n / 4;
+  if (negateCos) { k = n/2 - k; }
+  
+  bool flip = kBound > n / 8 + 1 && k > n / 8;
+  if (flip) { k = n / 4 - k; }
+
+  assert(k <= n / 8);
+
+#if TRIG_COMPUTE >= 2
+  double2 r = reducedCosSin(k, n);
+#elif TRIG_COMPUTE == 1
+  u32 a = (k + WIDTH/2) / WIDTH;
+  i32 b = k - a * WIDTH;
+  
+  double2 cs1 = TRIG_BH[a];
+  double c1 = cs1.x;
+  double s1 = cs1.y;
+  
+  double2 cs2 = TRIG_W[abs(b)];
+  double c2 = cs2.x;
+  double s2 = (b < 0) ? -cs2.y : cs2.y; 
+
+  // cos(a+b) = cos(a)cos(b) - sin(a)sin(b)
+  // sin(a+b) = cos(a)sin(b) + sin(a)cos(b)
+  // c2 is stored with "-1" trick to increase accuracy, so we use fma(x,y,x) for x*(y+1)
+  double c = fma(-s1, s2, fma(c1, c2, c1));
+  double s = fma(c1, s2, fma(s1, c2, s1));
+  double2 r = (double2)(c, s);
+#elif TRIG_COMPUTE == 0
+  double2 r = TRIG_N[k];
+#else
+#error set TRIG_COMPUTE to 0, 1 or 2.
+#endif
+
+  if (flip) { r = -swap(r); }
+  if (negateCos) { r.x = -r.x; }
+  if (negate) { r = -r; }
+  
+  return r;
+}
 
 void transposeWords(u32 W, u32 H, local Word2 *lds, const Word2 *in, Word2 *out) {
   u32 GPW = W / 64, GPH = H / 64;
@@ -2213,38 +2295,22 @@ void transposeWords(u32 W, u32 H, local Word2 *lds, const Word2 *in, Word2 *out)
   u32 gx = g / GPH;
   gx = (gy + gx) % GPW;
 
-  in   += gy * 64 * W + gx * 64;
-  out  += gy * 64     + gx * 64 * H;
-  
+  in   += 64 * W * gy + 64 * gx;
+  out  += 64 * gy + 64 * H * gx;
   u32 me = get_local_id(0);
-  u32 mx = me % 64;
-  u32 my = me / 64;
-  
-  Word2 u[16];
-
-  for (i32 i = 0; i < 16; ++i) { u[i] = in[(4 * i + my) * W + mx]; }
-
-  for (i32 i = 0; i < 16; ++i) {
-    u32 l = i * 4 + me / 64;
-    lds[l * 64 + (me + l) % 64 ] = u[i];
+  #pragma unroll 1
+  for (i32 i = 0; i < 64; ++i) {
+    lds[i * 64 + me] = in[i * W + me];
   }
   bar();
-  for (i32 i = 0; i < 16; ++i) {
-    u32 c = i * 4 + me / 64;
-    u32 l = me % 64;
-    u[i] = lds[l * 64 + (c + l) % 64];
-  }
-
-  for (i32 i = 0; i < 16; ++i) {
-    out[(4 * i + my) * H + mx] = u[i];
+  #pragma unroll 1
+  for (i32 i = 0; i < 64; ++i) {
+    out[i * H + me] = lds[me * 64 + i];
   }
 }
 
 #define P(x) global x * restrict
 #define CP(x) const P(x)
-typedef CP(T2) Trig;
-
-#define KERNEL(x) kernel __attribute__((reqd_work_group_size(x, 1, 1))) void
 
 // Read 64 Word2 starting at position 'startDword'.
 KERNEL(64) readResidue(P(Word2) out, CP(Word2) in, u32 startDword) {
@@ -2255,7 +2321,7 @@ KERNEL(64) readResidue(P(Word2) out, CP(Word2) in, u32 startDword) {
   out[me] = in[WIDTH * y + x];
 }
 
-u32 transPos(u32 k, u32 width, u32 height) { return k / height + k % height * width; }
+u32 transPos(u32 k, u32 middle, u32 width) { return k / width + k % width * middle; }
 
 KERNEL(256) sum64(global ulong* out, u32 sizeBytes, global ulong* in) {
   if (get_global_id(0) == 0) { out[0] = 0; }
@@ -2326,7 +2392,7 @@ void readCarryFusedLine(CP(T2) in, T2 *u, u32 line) {
 }
 
 // Read a line for tailFused or fftHin
-void readTailFusedLine(CP(T2) in, T2 *u, u32 line, u32 memline) {
+void readTailFusedLine(CP(T2) in, T2 *u, u32 line) {
   // We go to some length here to avoid dividing by MIDDLE in address calculations.
   // The transPos converted logical line number into physical memory line numbers
   // using this formula:  memline = line / WIDTH + line % WIDTH * MIDDLE.
@@ -2335,7 +2401,7 @@ void readTailFusedLine(CP(T2) in, T2 *u, u32 line, u32 memline) {
   // and the multiple of 320 component as (line % WIDTH) / 32
 
   u32 me = get_local_id(0);
-  u32 WG = IN_WG * IN_SPACING;
+  u32 WG = IN_WG;
   u32 SIZEY = WG / IN_SIZEX;
 
   in += line / WIDTH * WG;
@@ -2366,7 +2432,7 @@ KERNEL(G_H) fftHin(P(T2) out, CP(T2) in, Trig smallTrig) {
   T2 u[NH];
   u32 g = get_group_id(0);
 
-  readTailFusedLine(in, u, g, transPos(g, MIDDLE, WIDTH));
+  readTailFusedLine(in, u, g);
   ENABLE_MUL2();
   fft_HEIGHT(lds, u, smallTrig);
 
@@ -2389,24 +2455,91 @@ KERNEL(G_H) fftHout(P(T2) io, Trig smallTrig) {
   write(G_H, NH, u, io, 0);
 }
 
-// fftPremul: weight words with "A" (for IBDWT) followed by FFT.
-KERNEL(G_W) fftP(P(T2) out, CP(Word2) in, CP(T2) A, Trig smallTrig) {
+T fweightStep(u32 i) {
+  const T TWO_TO_NTH[8] = {
+#if SP
+    // 2^(k/8) for k in [0..8)
+    (1,0,0),
+    (1.09050775,-1.30775399e-08,-2.52512433e-16),
+    (1.18920708,3.79763527e-08,1.15004321e-15),
+    (1.29683959,-4.01899953e-08,1.57969474e-15),
+    (1.41421354,2.4203235e-08,-7.62806744e-16),
+    (1.54221082,8.07090483e-09,-1.42546261e-16),
+    (1.68179286,-2.47553267e-08,-5.84143725e-16),
+    (1.8340081,-1.1239278e-08,-1.89213528e-16),
+#else
+    // 2^(k/8) -1 for k in [0..8)
+    0,
+    0.090507732665257662,
+    0.18920711500272105,
+    0.29683955465100964,
+    0.41421356237309503,
+    0.54221082540794086,
+    0.68179283050742912,
+    0.83400808640934243,
+#endif
+  };
+  return TWO_TO_NTH[i * STEP % NW * (8 / NW)];
+}
+
+T iweightStep(u32 i) {
+  const T TWO_TO_MINUS_NTH[8] = {
+#if SP
+    // 2^-(k/8) for k in [0..8)
+    (1,0,0),
+    (0.917004049,-5.61963898e-09,-9.46067642e-17),
+    (0.840896428,-1.23776633e-08,-2.92071863e-16),
+    (0.771105409,4.03545242e-09,-7.12731307e-17),
+    (0.707106769,1.21016175e-08,-3.81403372e-16),
+    (0.648419797,-2.00949977e-08,7.89847371e-16),
+    (0.594603539,1.89881764e-08,5.75021604e-16),
+    (0.545253873,-6.53876997e-09,-1.26256216e-16)
+#else
+    // 2^-(k/8) - 1 for k in [0..8)
+    0,
+    -0.082995956795328771,
+    -0.15910358474628547,
+    -0.2288945872960296,
+    -0.29289321881345248,
+    -0.35158022267449518,
+    -0.40539644249863949,
+    -0.45474613366737116,
+#endif
+  };
+  return TWO_TO_MINUS_NTH[i * STEP % NW * (8 / NW)];
+}
+
+T fweightUnitStep(u32 i) {
+  T FWEIGHTS_[] = FWEIGHTS;
+  return FWEIGHTS_[i];
+}
+
+T iweightUnitStep(u32 i) {
+  T IWEIGHTS_[] = IWEIGHTS;
+  return IWEIGHTS_[i];
+}
+
+// fftPremul: weight words with IBDWT weights followed by FFT-width.
+KERNEL(G_W) fftP(P(T2) out, CP(Word2) in, Trig smallTrig) {
   local T2 lds[WIDTH / 2];
 
   T2 u[NW];
   u32 g = get_group_id(0);
 
   u32 step = WIDTH * g;
-  A   += step;
   in  += step;
   out += step;
 
   u32 me = get_local_id(0);
 
-  for (i32 i = 0; i < NW; ++i) {
+  T base = optionalHalve(fancyMul(CARRY_WEIGHTS[g / CARRY_LEN].y, THREAD_WEIGHTS[me].y));
+  base = optionalHalve(fancyMul(base, fweightUnitStep(g % CARRY_LEN)));
+
+  for (u32 i = 0; i < NW; ++i) {
+    T w1 = i == 0 ? base : optionalHalve(fancyMul(base, fweightStep(i)));
+    T w2 = optionalHalve(fancyMul(w1, WEIGHT_STEP));
     u32 p = G_W * i + me;
-    // u32 hk = g + BIG_HEIGHT * p;
-    u[i] = weight(in[p], A[p]);
+    u[i] = U2(in[p].x, in[p].y) * U2(w1, w2);
   }
   ENABLE_MUL2();
 
@@ -2418,6 +2551,8 @@ KERNEL(G_W) fftP(P(T2) out, CP(Word2) in, CP(T2) A, Trig smallTrig) {
 void fft_MIDDLE(T2 *u) {
 #if MIDDLE == 1
   // Do nothing
+#elif MIDDLE == 2
+  fft2(u);
 #elif MIDDLE == 3
   fft3(u);
 #elif MIDDLE == 4
@@ -2463,10 +2598,10 @@ void middleMul(T2 *u, u32 s, Trig trig) {
 
 // This is our slowest version - used when we are extremely worried about round off error.
 // Maximum multiply chain length is 1.
-  T2 w = slowTrig(s, BIG_HEIGHT / 2, SMALL_HEIGHT);
+  T2 w = slowTrig_BH(s, SMALL_HEIGHT);
   WADD(1, w);
   if ((MIDDLE - 2) % 3) {
-    T2 base = slowTrig(s * 2, BIG_HEIGHT / 2, SMALL_HEIGHT * 2);
+    T2 base = slowTrig_BH(s * 2, SMALL_HEIGHT * 2);
     WADD(2, base);
     if ((MIDDLE - 2) % 3 == 2) {
       WADD(3, base);
@@ -2474,7 +2609,7 @@ void middleMul(T2 *u, u32 s, Trig trig) {
     }
   }
   for (i32 i = (MIDDLE - 2) % 3 + 3; i < MIDDLE; i += 3) {
-    T2 base = slowTrig(s * i, BIG_HEIGHT / 2, SMALL_HEIGHT * i);
+    T2 base = slowTrig_BH(s * i, SMALL_HEIGHT * i);
     WADD(i - 1, base);
     WADD(i, base);
     WADD(i + 1, base);
@@ -2486,7 +2621,7 @@ void middleMul(T2 *u, u32 s, Trig trig) {
 
 // This is our second and third fastest versions - used when we are somewhat worried about round off error.
 // Maximum multiply chain length is MIDDLE/2 or MIDDLE/4.
-  T2 w = slowTrig(s, BIG_HEIGHT / 2, SMALL_HEIGHT);
+  T2 w = slowTrig_BH(s, SMALL_HEIGHT);
   WADD(1, w);
   WADD(2, sq(w));
   i32 group_start, group_size;
@@ -2497,7 +2632,7 @@ void middleMul(T2 *u, u32 s, Trig trig) {
     group_size = MIDDLE - 3;
 #endif
     i32 midpoint = group_start + group_size / 2;
-    T2 base = slowTrig(s * midpoint, BIG_HEIGHT / 2, SMALL_HEIGHT * midpoint);
+    T2 base = slowTrig_BH(s * midpoint, SMALL_HEIGHT * midpoint);
     T2 base2 = base;
     WADD(midpoint, base);
     for (i32 i = 1; i <= group_size / 2; ++i) {
@@ -2517,7 +2652,7 @@ void middleMul(T2 *u, u32 s, Trig trig) {
   
 #else
   
-  T2 w = slowTrig(s, BIG_HEIGHT / 2, SMALL_HEIGHT);
+  T2 w = slowTrig_BH(s, SMALL_HEIGHT);
   WADD(1, w);
   T2 base = sq(w);
   for (i32 i = 2; i < MIDDLE; ++i) {
@@ -2527,17 +2662,17 @@ void middleMul(T2 *u, u32 s, Trig trig) {
 #endif
 }
 
-void middleMul2(T2 *u, u32 g, u32 me, double factor) {
-  assert(g < WIDTH);
-  assert(me < SMALL_HEIGHT);
+void middleMul2(T2 *u, u32 x, u32 y, double factor) {
+  assert(x < WIDTH);
+  assert(y < SMALL_HEIGHT);
 
 #if MM2_CHAIN == 3
 
 // This is our slowest version - used when we are extremely worried about round off error.
 // Maximum multiply chain length is 1.
-  T2 w = slowTrig(g * SMALL_HEIGHT, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT);
+  T2 w = slowTrig_N(x * SMALL_HEIGHT, ND / MIDDLE);
   if (MIDDLE % 3) {
-    T2 base = slowTrig(g * me, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT) * factor;
+    T2 base = slowTrig_N(x * y, ND / MIDDLE) * factor;
     WADD(0, base);
     if (MIDDLE % 3 == 2) {
       WADD(1, base);
@@ -2545,7 +2680,7 @@ void middleMul2(T2 *u, u32 g, u32 me, double factor) {
     }
   }
   for (i32 i = MIDDLE % 3 + 1; i < MIDDLE; i += 3) {
-    T2 base = slowTrig(g * SMALL_HEIGHT * i + g * me, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT * (i + 1)) * factor;
+    T2 base = slowTrig_N(x * SMALL_HEIGHT * i + x * y, ND / MIDDLE * (i + 1)) * factor;
     WADD(i - 1, base);
     WADD(i, base);
     WADD(i + 1, base);
@@ -2557,7 +2692,7 @@ void middleMul2(T2 *u, u32 g, u32 me, double factor) {
 
 // This is our second and third fastest versions - used when we are somewhat worried about round off error.
 // Maximum multiply chain length is MIDDLE/2 or MIDDLE/4.
-  T2 w = slowTrig(g * SMALL_HEIGHT, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT);
+  T2 w = slowTrig_N(x * SMALL_HEIGHT, ND / MIDDLE);
   i32 group_start, group_size;
   for (group_start = 0; group_start < MIDDLE; group_start += group_size) {
 #if MM2_CHAIN == 2
@@ -2566,7 +2701,7 @@ void middleMul2(T2 *u, u32 g, u32 me, double factor) {
     group_size = MIDDLE;
 #endif
     i32 midpoint = group_start + group_size / 2;
-    T2 base = slowTrig(g * SMALL_HEIGHT * midpoint + g * me, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT * (midpoint + 1)) * factor;
+    T2 base = slowTrig_N(x * SMALL_HEIGHT * midpoint + x * y, ND / MIDDLE * (midpoint + 1)) * factor;
     T2 base2 = base;
     WADD(midpoint, base);
     for (i32 i = 1; i <= group_size / 2; ++i) {
@@ -2582,8 +2717,8 @@ void middleMul2(T2 *u, u32 g, u32 me, double factor) {
 
 // This is our fastest version - used when we are not worried about round off error.
 // Maximum multiply chain length equals MIDDLE.
-  T2 w = slowTrig(g * SMALL_HEIGHT, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT);
-  T2 base = slowTrig(g * me, BIG_HEIGHT * WIDTH / 2, WIDTH * SMALL_HEIGHT) * factor;
+  T2 w = slowTrig_N(x * SMALL_HEIGHT, ND/MIDDLE);
+  T2 base = slowTrig_N(x * y, ND/MIDDLE) * factor;
   for (i32 i = 0; i < MIDDLE; ++i) {
     u[i] = mul(u[i], base);
     base = mul(base, w);
@@ -2602,8 +2737,8 @@ void middleMul2(T2 *u, u32 g, u32 me, double factor) {
 
 void middleShuffle(local T *lds, T2 *u, u32 workgroupSize, u32 blockSize) {
   u32 me = get_local_id(0);
-  local T *p = lds + (me % blockSize) * (workgroupSize / blockSize) + me / blockSize;
   if (MIDDLE <= 8) {
+    local T *p = lds + (me % blockSize) * (workgroupSize / blockSize) + me / blockSize;
     for (int i = 0; i < MIDDLE; ++i) { p[i * workgroupSize] = u[i].x; }
     bar();
     for (int i = 0; i < MIDDLE; ++i) { u[i].x = lds[me + workgroupSize * i]; }
@@ -2612,21 +2747,26 @@ void middleShuffle(local T *lds, T2 *u, u32 workgroupSize, u32 blockSize) {
     bar();
     for (int i = 0; i < MIDDLE; ++i) { u[i].y = lds[me + workgroupSize * i]; }
   } else {
-    for (int i = 0; i < MIDDLE/2; ++i) { p[i * workgroupSize] = u[i].x; }
+    local int *p1 = ((local int*) lds) + (me % blockSize) * (workgroupSize / blockSize) + me / blockSize;
+    local int *p2 = (local int*) lds;
+    int4 *pu = (int4 *)u;
+
+    for (int i = 0; i < MIDDLE; ++i) { p1[i * workgroupSize] = pu[i].x; }
     bar();
-    for (int i = 0; i < MIDDLE/2; ++i) { u[i].x = lds[me + workgroupSize * i]; }
+    for (int i = 0; i < MIDDLE; ++i) { pu[i].x = p2[me + workgroupSize * i]; }
     bar();
-    for (int i = 0; i < MIDDLE/2; ++i) { p[i * workgroupSize] = u[i].y; }
+    for (int i = 0; i < MIDDLE; ++i) { p1[i * workgroupSize] = pu[i].y; }
     bar();
-    for (int i = 0; i < MIDDLE/2; ++i) { u[i].y = lds[me + workgroupSize * i]; }
+    for (int i = 0; i < MIDDLE; ++i) { pu[i].y = p2[me + workgroupSize * i]; }
     bar();
-    for (int i = MIDDLE/2; i < MIDDLE; ++i) { p[(i - MIDDLE/2) * workgroupSize] = u[i].x; }
+
+    for (int i = 0; i < MIDDLE; ++i) { p1[i * workgroupSize] = pu[i].z; }
     bar();
-    for (int i = MIDDLE/2; i < MIDDLE; ++i) { u[i].x = lds[me + workgroupSize * (i - MIDDLE/2)]; }
+    for (int i = 0; i < MIDDLE; ++i) { pu[i].z = p2[me + workgroupSize * i]; }
     bar();
-    for (int i = MIDDLE/2; i < MIDDLE; ++i) { p[(i - MIDDLE/2) * workgroupSize] = u[i].y; }
+    for (int i = 0; i < MIDDLE; ++i) { p1[i * workgroupSize] = pu[i].w; }
     bar();
-    for (int i = MIDDLE/2; i < MIDDLE; ++i) { u[i].y = lds[me + workgroupSize * (i - MIDDLE/2)]; }
+    for (int i = 0; i < MIDDLE; ++i) { pu[i].w = p2[me + workgroupSize * i]; }
   }
 }
 
@@ -2659,13 +2799,17 @@ KERNEL(IN_WG) fftMiddleIn(P(T2) out, volatile CP(T2) in, Trig trig) {
   fft_MIDDLE(u);
 
   middleMul(u, starty + my, trig);
-  local T lds[IN_WG * (MIDDLE <= 8 ? MIDDLE : ((MIDDLE + 1) / 2))];
+  local T lds[IN_WG / 2 * (MIDDLE <= 8 ? 2 * MIDDLE : MIDDLE)];
   middleShuffle(lds, u, IN_WG, IN_SIZEX);
 
-  out += gx * (MIDDLE * SMALL_HEIGHT * IN_SIZEX) + (gy / IN_SPACING) * (MIDDLE * IN_WG * IN_SPACING) + (gy % IN_SPACING) * SIZEY;
-  out += (me / SIZEY) * (IN_SPACING * SIZEY) + (me % SIZEY);
+  // out += BIG_HEIGHT * startx + starty + BIG_HEIGHT * my + mx;
+  // for (u32 i = 0; i < MIDDLE; ++i) { out[i * SMALL_HEIGHT] = u[i]; }
+  
+  out += gx * (BIG_HEIGHT * IN_SIZEX) + gy * (MIDDLE * IN_WG) + me;
+  for (i32 i = 0; i < MIDDLE; ++i) { out[i * IN_WG] = u[i]; }  
 
-  for (i32 i = 0; i < MIDDLE; ++i) { out[i * (IN_WG * IN_SPACING)] = u[i]; }
+  // out += gx * (MIDDLE * SMALL_HEIGHT * IN_SIZEX) + gy * (MIDDLE * IN_WG);
+  // out += me;
 }
 
 KERNEL(OUT_WG) fftMiddleOut(P(T2) out, P(T2) in, Trig trig) {
@@ -2703,6 +2847,8 @@ KERNEL(OUT_WG) fftMiddleOut(P(T2) out, P(T2) in, Trig trig) {
   // Finally, roundoff errors are sometimes improved if we use the next lower double precision
   // number.  This may be due to roundoff errors introduced by applying inexact TWO_TO_N_8TH weights.
   double factor = 1.0 / (4 * 4 * NWORDS);
+
+#if 0
 #if MAX_ACCURACY && (MIDDLE == 4 || MIDDLE == 5 || MIDDLE == 10 || MIDDLE == 11 || MIDDLE == 13)
   long tmp = as_long(factor);
   tmp--;
@@ -2712,9 +2858,10 @@ KERNEL(OUT_WG) fftMiddleOut(P(T2) out, P(T2) in, Trig trig) {
   tmp -= 2;
   factor = as_double(tmp);
 #endif
+#endif
 
   middleMul2(u, starty + my, startx + mx, factor);
-  local T lds[OUT_WG * (MIDDLE <= 8 ? MIDDLE : ((MIDDLE + 1) / 2))];
+  local T lds[OUT_WG / 2 * (MIDDLE <= 8 ? 2 * MIDDLE : MIDDLE)];
 
   middleShuffle(lds, u, OUT_WG, OUT_SIZEX);
 
@@ -2755,41 +2902,44 @@ void updateStats(float roundMax, u32 carryMax, global u32* roundOut, global u32*
 }
 
 // Carry propagation with optional MUL-3, over CARRY_LEN words.
-// Input is conjugated and inverse-weighted.
+// Input arrives conjugated and inverse-weighted.
 
 //{{ CARRYA
-KERNEL(G_W) NAME(P(Word2) out, CP(T2) in, P(CarryABM) carryOut, CP(T2) A, CP(u32) extras, P(u32) roundOut, P(u32) carryStats) {
+KERNEL(G_W) NAME(P(Word2) out, CP(T2) in, P(CarryABM) carryOut, CP(u32) bits, P(u32) roundOut, P(u32) carryStats) {
   ENABLE_MUL2();
   u32 g  = get_group_id(0);
   u32 me = get_local_id(0);
   u32 gx = g % NW;
   u32 gy = g / NW;
 
-  CarryABM carry = 0;
-#if SUB2
-  if (g == 0 && me == 0) { carry = -2; }
-#endif
-  
+  CarryABM carry = 0;  
   float roundMax = 0;
   u32 carryMax = 0;
+
+  // Split 32 bits into CARRY_LEN groups of 2 bits.
+#define GPW (16 / CARRY_LEN)
+  u32 b = bits[(G_W * g + me) / GPW] >> (me % GPW * (2 * CARRY_LEN));
+#undef GPW
+
+  T base = optionalDouble(fancyMul(CARRY_WEIGHTS[gy].x, THREAD_WEIGHTS[me].x));
   
-  u32 extra = reduce(extras[G_W * CARRY_LEN * gy + me] + (u32) (2u * BIG_HEIGHT * G_W * (u64) STEP % NWORDS) * gx % NWORDS);
+    base = optionalDouble(fancyMul(base, iweightStep(gx)));
+
   for (i32 i = 0; i < CARRY_LEN; ++i) {
     u32 p = G_W * gx + WIDTH * (CARRY_LEN * gy + i) + me;
-    bool b1 = isBigWord(extra);
-    bool b2 = isBigWord(reduce(extra + STEP));
-    T2 x = conjugate(in[p]) * A[p];
+    double w1 = i == 0 ? base : optionalDouble(fancyMul(base, iweightUnitStep(i)));
+    double w2 = optionalDouble(fancyMul(w1, IWEIGHT_STEP));
+    T2 x = conjugate(in[p]) * U2(w1, w2);
     
 #if STATS
-    roundMax = max(roundMax, roundoff(conjugate(in[p]), A[p]));
+    roundMax = max(roundMax, roundoff(conjugate(in[p]), U2(w1, w2)));
 #endif
     
 #if DO_MUL3
-    out[p] = carryPairMul(x, &carry, b1, b2, carry, &carryMax, MUST_BE_EXACT);
+    out[p] = carryPairMul(x, &carry, test(b, 2 * i), test(b, 2 * i + 1), carry, &carryMax, MUST_BE_EXACT);
 #else
-    out[p] = carryPair(x, &carry, b1, b2, carry, &carryMax, MUST_BE_EXACT);
+    out[p] = carryPair(x, &carry, test(b, 2 * i), test(b, 2 * i + 1), carry, &carryMax, MUST_BE_EXACT);
 #endif
-    extra = reduce(extra + (u32) (2u * STEP % NWORDS));
   }
   carryOut[G_W * g + me] = carry;
 
@@ -2799,20 +2949,20 @@ KERNEL(G_W) NAME(P(Word2) out, CP(T2) in, P(CarryABM) carryOut, CP(T2) A, CP(u32
 }
 //}}
 
-//== CARRYA NAME=carryA,DO_MUL3=0,SUB2=0
-//== CARRYA NAME=carryM,DO_MUL3=1,SUB2=0
-//== CARRYA NAME=carryLL,DO_MUL3=0,SUB2=1
+//== CARRYA NAME=carryA,DO_MUL3=0
+//== CARRYA NAME=carryM,DO_MUL3=1
 
-KERNEL(G_W) carryB(P(Word2) io, CP(CarryABM) carryIn, CP(u32) extras) {
+KERNEL(G_W) carryB(P(Word2) io, CP(CarryABM) carryIn, CP(u32) bits) {
   u32 g  = get_group_id(0);
   u32 me = get_local_id(0);  
   u32 gx = g % NW;
   u32 gy = g / NW;
 
-  ENABLE_MUL2();
+  // Split 32 bits into CARRY_LEN groups of 2 bits.
+#define GPW (16 / CARRY_LEN)
+  u32 b = bits[(G_W * g + me) / GPW] >> (me % GPW * (2 * CARRY_LEN));
+#undef GPW
 
-  u32 extra = reduce(extras[G_W * CARRY_LEN * gy + me] + (u32) (2u * BIG_HEIGHT * G_W * (u64) STEP % NWORDS) * gx % NWORDS);
-  
   u32 step = G_W * gx + WIDTH * CARRY_LEN * gy;
   io += step;
 
@@ -2826,9 +2976,8 @@ KERNEL(G_W) carryB(P(Word2) io, CP(CarryABM) carryIn, CP(u32) extras) {
 
   for (i32 i = 0; i < CARRY_LEN; ++i) {
     u32 p = i * WIDTH + me;
-    io[p] = carryWord(io[p], &carry, isBigWord(extra), isBigWord(reduce(extra + STEP)));
+    io[p] = carryWord(io[p], &carry, test(b, 2 * i), test(b, 2 * i + 1));
     if (!carry) { return; }
-    extra = reduce(extra + (u32) (2u * STEP % NWORDS));
   }
 }
 
@@ -2837,7 +2986,7 @@ KERNEL(G_W) carryB(P(Word2) io, CP(CarryABM) carryIn, CP(u32) extras) {
 // See tools/expand.py for the meaning of '//{{', '//}}', '//==' -- a form of macro expansion
 //{{ CARRY_FUSED
 KERNEL(G_W) NAME(P(T2) out, CP(T2) in, P(i64) carryShuttle, P(u32) ready, Trig smallTrig,
-                 CP(u32) bits, CP(T2) groupWeights, CP(T2) threadWeights, P(u32) roundOut, P(u32) carryStats) {
+                 CP(u32) bits, P(u32) roundOut, P(u32) carryStats) {
   local T2 lds[WIDTH / 2];
   
   u32 gr = get_group_id(0);
@@ -2850,22 +2999,19 @@ KERNEL(G_W) NAME(P(T2) out, CP(T2) in, P(i64) carryShuttle, P(u32) ready, Trig s
   
   readCarryFusedLine(in, u, line);
 
-#if NW == 4
-  u32 b = bits[G_W / 4 * line + me / 4];
-  b = b >> ((me & 3) * 8);
-#else
-  u32 b = bits[G_W / 2 * line + me / 2];
-  b = b >> ((me & 1) * 16);
-#endif
-
+  // Split 32 bits into NW groups of 2 bits.
+#define GPW (16 / NW)
+  u32 b = bits[(G_W * line + me) / GPW] >> (me % GPW * (2 * NW));
+#undef GPW
+  
   ENABLE_MUL2();
   fft_WIDTH(lds, u, smallTrig);
 
 // Convert each u value into 2 words and a 32 or 64 bit carry
 
   Word2 wu[NW];
-  // For one (or more) bits of precision, Gpu.cpp subtract 1.0 from thread weights and we use fma here rather than a multiply
-  T2 weights = fma(groupWeights[line], threadWeights[me], groupWeights[line]);
+  T2 weights = fancyMul(CARRY_WEIGHTS[line / CARRY_LEN], THREAD_WEIGHTS[me]);
+  weights = fancyMul(U2(optionalDouble(weights.x), optionalHalve(weights.y)), U2(iweightUnitStep(line % CARRY_LEN), fweightUnitStep(line % CARRY_LEN)));
 
 #if CF_MUL
   P(CFMcarry) carryShuttlePtr = (P(CFMcarry)) carryShuttle;
@@ -2877,57 +3023,20 @@ KERNEL(G_W) NAME(P(T2) out, CP(T2) in, P(i64) carryShuttle, P(u32) ready, Trig s
 
   float roundMax = 0;
   u32 carryMax = 0;
+  
+  // Apply the inverse weights
 
-  const double TWO_TO_MINUS_1_8TH_MINUS_1 = -0.08299595679532876825645840520586; // 2^-0.125 - 1.0
-  const double TWO_TO_MINUS_2_8TH_MINUS_1 = -0.15910358474628545696887452376679; // 2^-0.25 - 1.0
-  const double TWO_TO_MINUS_3_8TH_MINUS_1 = -0.22889458729602958819385406895463; // 2^-0.375 - 1.0
-  const double TWO_TO_MINUS_4_8TH_MINUS_1 = -0.29289321881345247559915563789515; // 2^-0.5 - 1.0
-  const double TWO_TO_MINUS_5_8TH_MINUS_1 = -0.35158022267449516703312294110377; // 2^-0.625 - 1.0
-  const double TWO_TO_MINUS_6_8TH_MINUS_1 = -0.40539644249863946664125001471976; // 2^-0.75 - 1.0
-  const double TWO_TO_MINUS_7_8TH_MINUS_1 = -0.45474613366737117039649467211965; // 2^-0.875 - 1.0
-  const double TWO_TO_MINUS_1_8TH = 0.91700404320467123174354159479414; // 2^-0.125
-  const double TWO_TO_MINUS_2_8TH = 0.84089641525371454303112547623321; // 2^-0.25
-  const double TWO_TO_MINUS_3_8TH = 0.77110541270397041180614593104537; // 2^-0.375
-  const double TWO_TO_MINUS_4_8TH = 0.70710678118654752440084436210485; // 2^-0.5
-  const double TWO_TO_MINUS_5_8TH = 0.64841977732550483296687705889623; // 2^-0.625
-  const double TWO_TO_MINUS_6_8TH = 0.59460355750136053335874998528024; // 2^-0.75
-  const double TWO_TO_MINUS_7_8TH = 0.54525386633262882960350532788035; // 2^-0.875
-
-// Apply the inverse weights
-
-  for (i32 i = 0; i < NW; ++i) {
-    T baseInvWeight, invWeight, invWeight2;
-    if (i == 0) invWeight = baseInvWeight = optionalDouble(weights.x);
-#if MAX_ACCURACY
-    else if (((i * STEP) % NW) * (8 / NW) == 1) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_1_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 2) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_2_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 3) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_3_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 4) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_4_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 5) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_5_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 6) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_6_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 7) invWeight = optionalDouble(mul_by_const_plus_1(baseInvWeight, TWO_TO_MINUS_7_8TH_MINUS_1));
-#else
-    else if ((STEP % NW) * (8 / NW) == 1) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_1_8TH);
-    else if ((STEP % NW) * (8 / NW) == 2) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_2_8TH);
-    else if ((STEP % NW) * (8 / NW) == 3) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_3_8TH);
-    else if ((STEP % NW) * (8 / NW) == 4) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_4_8TH);
-    else if ((STEP % NW) * (8 / NW) == 5) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_5_8TH);
-    else if ((STEP % NW) * (8 / NW) == 6) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_6_8TH);
-    else if ((STEP % NW) * (8 / NW) == 7) invWeight = optionalDouble(invWeight * TWO_TO_MINUS_7_8TH);
-#endif
-    invWeight2 = optionalDouble(mul_by_const_plus_1(invWeight, IWEIGHT_STEP_MINUS_1));
+  T invBase = optionalDouble(weights.x);
+  
+  for (u32 i = 0; i < NW; ++i) {
+    T invWeight1 = i == 0 ? invBase : optionalDouble(fancyMul(invBase, iweightStep(i)));
+    T invWeight2 = optionalDouble(fancyMul(invWeight1, IWEIGHT_STEP));
 
 #if STATS
-    roundMax = max(roundMax, roundoff(conjugate(u[i]), U2(invWeight, invWeight2)));
+    roundMax = max(roundMax, roundoff(conjugate(u[i]), U2(invWeight1, invWeight2)));
 #endif
 
-    u[i] = conjugate(u[i]) * U2(invWeight, invWeight2);
-
-// For LL tests, apply the -2 here.  If we ever support prime95 style shift counts, it needs to be here - prior to calculating carry.
-
-#if SUB2
-   if (i == 0 && line == 0 && me == 0) u[i].x -= 2.0;
-#endif
+    u[i] = conjugate(u[i]) * U2(invWeight1, invWeight2);
   }
 
   // Generate our output carries
@@ -2985,48 +3094,13 @@ KERNEL(G_W) NAME(P(T2) out, CP(T2) in, P(i64) carryShuttle, P(u32) ready, Trig s
   for (i32 i = 0; i < NW; ++i) {
     wu[i] = carryFinal(wu[i], carry[i], test(b, 2 * i));
   }
-
-// Apply the weights, converting from integers back to doubles
-
-  const double TWO_TO_1_8TH_MINUS_1 = 0.0905077326652576592070106557607; // 2^0.125 - 1.0
-  const double TWO_TO_2_8TH_MINUS_1 = 0.1892071150027210667174999705605; // 2^0.25 - 1.0
-  const double TWO_TO_3_8TH_MINUS_1 = 0.2968395546510096659337541177925; // 2^0.375 - 1.0
-  const double TWO_TO_4_8TH_MINUS_1 = 0.4142135623730950488016887242097; // 2^0.5 - 1.0
-  const double TWO_TO_5_8TH_MINUS_1 = 0.5422108254079408236122918620907; // 2^0.625 - 1.0
-  const double TWO_TO_6_8TH_MINUS_1 = 0.6817928305074290860622509524664; // 2^0.75 - 1.0
-  const double TWO_TO_7_8TH_MINUS_1 = 0.8340080864093424634870831895883; // 2^0.875 - 1.0
-  const double TWO_TO_1_8TH = 1.0905077326652576592070106557607; // 2^0.125
-  const double TWO_TO_2_8TH = 1.1892071150027210667174999705605; // 2^0.25
-  const double TWO_TO_3_8TH = 1.2968395546510096659337541177925; // 2^0.375
-  const double TWO_TO_4_8TH = 1.4142135623730950488016887242097; // 2^0.5
-  const double TWO_TO_5_8TH = 1.5422108254079408236122918620907; // 2^0.625
-  const double TWO_TO_6_8TH = 1.6817928305074290860622509524664; // 2^0.75
-  const double TWO_TO_7_8TH = 1.8340080864093424634870831895883; // 2^0.875
-
-  for (i32 i = 0; i < NW; ++i) {
-    T baseWeight, weight, weight2;
-    if (i == 0) weight = baseWeight = optionalHalve(weights.y);
-#if MAX_ACCURACY
-    else if (((i * STEP) % NW) * (8 / NW) == 1) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_1_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 2) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_2_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 3) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_3_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 4) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_4_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 5) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_5_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 6) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_6_8TH_MINUS_1));
-    else if (((i * STEP) % NW) * (8 / NW) == 7) weight = optionalHalve(mul_by_const_plus_1(baseWeight, TWO_TO_7_8TH_MINUS_1));
-#else
-    else if ((STEP % NW) * (8 / NW) == 1) weight = optionalHalve(weight * TWO_TO_1_8TH);
-    else if ((STEP % NW) * (8 / NW) == 2) weight = optionalHalve(weight * TWO_TO_2_8TH);
-    else if ((STEP % NW) * (8 / NW) == 3) weight = optionalHalve(weight * TWO_TO_3_8TH);
-    else if ((STEP % NW) * (8 / NW) == 4) weight = optionalHalve(weight * TWO_TO_4_8TH);
-    else if ((STEP % NW) * (8 / NW) == 5) weight = optionalHalve(weight * TWO_TO_5_8TH);
-    else if ((STEP % NW) * (8 / NW) == 6) weight = optionalHalve(weight * TWO_TO_6_8TH);
-    else if ((STEP % NW) * (8 / NW) == 7) weight = optionalHalve(weight * TWO_TO_7_8TH);
-#endif
-    weight2 = optionalHalve(mul_by_const_plus_1(weight, WEIGHT_STEP_MINUS_1));
-
-    u[i].x = (double) wu[i].x * weight;
-    u[i].y = (double) wu[i].y * weight2;
+  
+  T base = optionalHalve(weights.y);
+  
+  for (u32 i = 0; i < NW; ++i) {
+    T weight1 = i == 0 ? base : optionalHalve(fancyMul(base, fweightStep(i)));
+    T weight2 = optionalHalve(fancyMul(weight1, WEIGHT_STEP));
+    u[i] = U2(wu[i].x, wu[i].y) * U2(weight1, weight2);
   }
 
 // Clear carry ready flag for next iteration
@@ -3041,18 +3115,17 @@ KERNEL(G_W) NAME(P(T2) out, CP(T2) in, P(i64) carryShuttle, P(u32) ready, Trig s
 }
 //}}
 
-//== CARRY_FUSED NAME=carryFused,    CF_MUL=0,SUB2=0
-//== CARRY_FUSED NAME=carryFusedMul, CF_MUL=1,SUB2=0
-//== CARRY_FUSED NAME=carryFusedLL,  CF_MUL=0,SUB2=1
+//== CARRY_FUSED NAME=carryFused,    CF_MUL=0
+//== CARRY_FUSED NAME=carryFusedMul, CF_MUL=1
 
 // from transposed to sequential.
-KERNEL(256) transposeOut(P(Word2) out, CP(Word2) in) {
+KERNEL(64) transposeOut(P(Word2) out, CP(Word2) in) {
   local Word2 lds[4096];
   transposeWords(WIDTH, BIG_HEIGHT, lds, in, out);
 }
 
 // from sequential to transposed.
-KERNEL(256) transposeIn(P(Word2) out, CP(Word2) in) {
+KERNEL(64) transposeIn(P(Word2) out, CP(Word2) in) {
   local Word2 lds[4096];
   transposeWords(BIG_HEIGHT, WIDTH, lds, in, out);
 }
@@ -3200,37 +3273,6 @@ void pairMul(u32 N, T2 *u, T2 *v, T2 *p, T2 *q, T2 base_squared, bool special) {
   }
 }
 
-KERNEL(SMALL_HEIGHT / 2 / 4) square(P(T2) out, CP(T2) in) {
-  u32 W = SMALL_HEIGHT;
-  u32 H = ND / W;
-
-  ENABLE_MUL2();
-
-  u32 me = get_local_id(0);
-  u32 line1 = get_group_id(0);
-  u32 line2 = (H - line1) % H;
-  u32 g1 = transPos(line1, MIDDLE, WIDTH);
-  u32 g2 = transPos(line2, MIDDLE, WIDTH);
-
-  T2 base_squared = slowTrig(me * H + line1, W * H / 2, W * H / 4);
-  T2 step = U2(M_SQRT1_2, -M_SQRT1_2); // trig(pi/4)
-  
-  for (u32 i = 0; i < 4; ++i, base_squared = mul(base_squared, step)) {
-    if (i == 0 && line1 == 0 && me == 0) {
-      out[0]     = foo_m2(conjugate(in[0]));
-      out[W / 2] = 4 * sq(conjugate(in[W / 2]));
-    } else {
-      u32 k = g1 * W + i * (W / 8) + me;
-      u32 v = g2 * W + (W - 1) + (line1 == 0) - i * (W / 8) - me;
-      T2 a = in[k];
-      T2 b = in[v];
-      onePairSq(a, b, swap_squared(base_squared));
-      out[k] = a;
-      out[v] = b;
-    }
-  }
-}
-
 //{{ MULTIPLY
 KERNEL(SMALL_HEIGHT / 2) NAME(P(T2) io, CP(T2) in) {
   u32 W = SMALL_HEIGHT;
@@ -3266,16 +3308,16 @@ KERNEL(SMALL_HEIGHT / 2) NAME(P(T2) io, CP(T2) in) {
   T2 c = in[k];
   T2 d = in[v];
 #endif
-  onePairMul(a, b, c, d, swap_squared(slowTrig(me * H + line1, W * H / 2, W * H / 4)));
+  onePairMul(a, b, c, d, swap_squared(slowTrig_N(me * H + line1, ND / 4)));
   io[k] = a;
   io[v] = b;
 }
 //}}
 
-//== MULTIPLY NAME=multiply, MULTIPLY_DELTA=0
+//== MULTIPLY NAME=kernelMultiply, MULTIPLY_DELTA=0
 
 #if NO_P2_FUSED_TAIL
-//== MULTIPLY NAME=multiplyDelta, MULTIPLY_DELTA=1
+//== MULTIPLY NAME=kernelMultiplyDelta, MULTIPLY_DELTA=1
 #endif
 
 
@@ -3299,8 +3341,8 @@ KERNEL(G_H) NAME(P(T2) out, CP(T2) in, Trig smallTrig1, Trig smallTrig2) {
   read(G_H, NH, u, in, memline1 * SMALL_HEIGHT);
   read(G_H, NH, v, in, memline2 * SMALL_HEIGHT);
 #else
-  readTailFusedLine(in, u, line1, memline1);
-  readTailFusedLine(in, v, line2, memline2);
+  readTailFusedLine(in, u, line1);
+  readTailFusedLine(in, v, line2);
   fft_HEIGHT(lds, u, smallTrig1);
   bar();
   fft_HEIGHT(lds, v, smallTrig1);
@@ -3310,16 +3352,16 @@ KERNEL(G_H) NAME(P(T2) out, CP(T2) in, Trig smallTrig1, Trig smallTrig2) {
   if (line1 == 0) {
     // Line 0 is special: it pairs with itself, offseted by 1.
     reverse(G_H, lds, u + NH/2, true);    
-    pairSq(NH/2, u,   u + NH/2, slowTrig(me, W / 2, W / 4), true);
+    pairSq(NH/2, u,   u + NH/2, slowTrig_2SH(2 * me, SMALL_HEIGHT / 2), true);
     reverse(G_H, lds, u + NH/2, true);
 
     // Line H/2 also pairs with itself (but without offset).
     reverse(G_H, lds, v + NH/2, false);
-    pairSq(NH/2, v,   v + NH/2, slowTrig(1 + 2 * me, W, W / 2), false);
+    pairSq(NH/2, v,   v + NH/2, slowTrig_2SH(1 + 2 * me, SMALL_HEIGHT / 2), false);
     reverse(G_H, lds, v + NH/2, false);
   } else {    
     reverseLine(G_H, lds, v);
-    pairSq(NH, u, v, slowTrig(line1 + me * H, ND / 2, ND / 4), false);
+    pairSq(NH, u, v, slowTrig_N(line1 + me * H, ND / 4), false);
     reverseLine(G_H, lds, v);
   }
 
@@ -3366,16 +3408,16 @@ KERNEL(G_H) NAME(P(T2) out, CP(T2) in, CP(T2) a,
   ENABLE_MUL2();
   
 #if MUL_DELTA
-  readTailFusedLine(in, u, line1, memline1);
-  readTailFusedLine(in, v, line2, memline2);
+  readTailFusedLine(in, u, line1);
+  readTailFusedLine(in, v, line2);
   readDelta(G_H, NH, p, a, b, memline1 * SMALL_HEIGHT);
   readDelta(G_H, NH, q, a, b, memline2 * SMALL_HEIGHT);
   fft_HEIGHT(lds, u, smallTrig1);
   bar();
   fft_HEIGHT(lds, v, smallTrig1);
 #elif MUL_LOW
-  readTailFusedLine(in, u, line1, memline1);
-  readTailFusedLine(in, v, line2, memline2);
+  readTailFusedLine(in, u, line1);
+  readTailFusedLine(in, v, line2);
   read(G_H, NH, p, a, memline1 * SMALL_HEIGHT);
   read(G_H, NH, q, a, memline2 * SMALL_HEIGHT);
   fft_HEIGHT(lds, u, smallTrig1);
@@ -3387,10 +3429,10 @@ KERNEL(G_H) NAME(P(T2) out, CP(T2) in, CP(T2) a,
   read(G_H, NH, p, in, memline1 * SMALL_HEIGHT);
   read(G_H, NH, q, in, memline2 * SMALL_HEIGHT);
 #else
-  readTailFusedLine(in, u, line1, memline1);
-  readTailFusedLine(in, v, line2, memline2);
-  readTailFusedLine(a, p, line1, memline1);
-  readTailFusedLine(a, q, line2, memline2);
+  readTailFusedLine(in, u, line1);
+  readTailFusedLine(in, v, line2);
+  readTailFusedLine(a, p, line1);
+  readTailFusedLine(a, q, line2);
   fft_HEIGHT(lds, u, smallTrig1);
   bar();
   fft_HEIGHT(lds, v, smallTrig1);
@@ -3404,19 +3446,19 @@ KERNEL(G_H) NAME(P(T2) out, CP(T2) in, CP(T2) a,
   if (line1 == 0) {
     reverse(G_H, lds, u + NH/2, true);
     reverse(G_H, lds, p + NH/2, true);
-    pairMul(NH/2, u,  u + NH/2, p, p + NH/2, slowTrig(me, W / 2, W / 4), true);
+    pairMul(NH/2, u,  u + NH/2, p, p + NH/2, slowTrig_2SH(2 * me, SMALL_HEIGHT / 2), true);
     reverse(G_H, lds, u + NH/2, true);
     reverse(G_H, lds, p + NH/2, true);
 
     reverse(G_H, lds, v + NH/2, false);
     reverse(G_H, lds, q + NH/2, false);
-    pairMul(NH/2, v,  v + NH/2, q, q + NH/2, slowTrig(1 + 2 * me, W, W / 2), false);
+    pairMul(NH/2, v,  v + NH/2, q, q + NH/2, slowTrig_2SH(1 + 2 * me, SMALL_HEIGHT / 2), false);
     reverse(G_H, lds, v + NH/2, false);
     reverse(G_H, lds, q + NH/2, false);
   } else {    
     reverseLine(G_H, lds, v);
     reverseLine(G_H, lds, q);
-    pairMul(NH, u, v, p, q, slowTrig(line1 + me * H, W * H / 2, W * H / 4), false);
+    pairMul(NH, u, v, p, q, slowTrig_N(line1 + me * H, ND / 4), false);
     reverseLine(G_H, lds, v);
     reverseLine(G_H, lds, q);
   }
@@ -3440,13 +3482,79 @@ KERNEL(G_H) NAME(P(T2) out, CP(T2) in, CP(T2) a,
 //== TAIL_FUSED_MUL NAME=tailFusedMulDelta, MUL_DELTA=1, MUL_LOW=0, MUL_2LOW=0
 #endif // NO_P2_FUSED_TAIL
 
+KERNEL(64) readHwTrig(global float2* outSH, global float2* outBH, global float2* outN) {
+  for (u32 k = get_global_id(0); k <= SMALL_HEIGHT / 4; k += get_global_size(0)) {
+    outSH[k] = (float2) (fastCosSP(k, SMALL_HEIGHT * 2), fastSinSP(k, SMALL_HEIGHT * 2, 1));
+  }
+  
+  for (u32 k = get_global_id(0); k <= BIG_HEIGHT / 8; k += get_global_size(0)) {
+    outBH[k] = (float2) (fastCosSP(k, BIG_HEIGHT), fastSinSP(k, BIG_HEIGHT, MIDDLE));
+  }
+
+  for (u32 k = get_global_id(0); k <= ND / 8; k += get_global_size(0)) {
+    outN[k] = (float2) (fastCosSP(k, ND), fastSinSP(k, ND, MIDDLE));
+  }
+}
+ 
 // Generate a small unused kernel so developers can look at how well individual macros assemble and optimize
 #ifdef TEST_KERNEL
-KERNEL(256) testKernel(global double* io) {
-  u32 me = get_local_id(0);
-  i32 outCarry = 0;
-  io[me] = carryStep(doubleToLong(io[me], outCarry), &outCarry, me > 15, CAN_BE_INEXACT);
-  io[me+256] = outCarry;
+
+typedef long long i128;
+typedef unsigned long long u128;
+
+u32  U32(u32 x)   { return x; }
+u64  U64(u64 x)   { return x; }
+u128 U128(u128 x) { return x; }
+i32  I32(i32 x)   { return x; }
+i64  I64(i64 x)   { return x; }
+i128 I128(i128 x) { return x; }
+
+u32 hiU32(u64 x) { return x >> 32; }
+u64 hiU64(u128 x) { return x >> 64; }
+
+#define PRIME 0xffffffff00000001
+
+// x * 0xffffffff
+u64 mulm1(u32 x) { return (U64(x) << 32) - x; }
+
+u64 addc(u64 a, u64 b) {
+  u64 s = a + b;
+  return s + (U32(-1) + (s >= a));
+  // return (s < a) ? s + U32(-1) : s;
 }
+
+u64 modmul(u64 a, u64 b) {
+  u128 ab = U128(a) * b;
+  u64 low = U64(ab);
+  u64 high = ab >> 64;
+  u32 hl = U32(high);
+  u32 hh = high >> 32;
+  u64 s = addc(low, mulm1(hl));
+  u64 hhm1 = mulm1(hh);
+  s = addc(s, hhm1 << 32);
+  s = addc(s, mulm1(hhm1 >> 32));
+  return s;
+}
+
+kernel void testKernel(global ulong* io) {
+  uint me = get_local_id(0);
+
+  ulong a = io[me];
+  ulong b = io[me + 1];
+  io[me] = modmul(a, b);
+}
+
+/*
+kernel void testKernel(global uint* io) {
+  uint me = get_local_id(0);
+
+  uint a = io[me];
+  uint b = io[me + 1];
+  uint s = a + b;
+  bool carry = (s < a);
+  io[me] = s + carry;
+}
+*/
+
 #endif
 

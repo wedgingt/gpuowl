@@ -8,7 +8,6 @@
 #include "Args.h"
 
 #include <cassert>
-#include <cstring>
 #include <string>
 #include <optional>
 
@@ -22,32 +21,34 @@ std::optional<Task> parse(const std::string& line) {
   u32 wantsPm1 = 0;
   u32 B1 = 0, B2 = 0;
 
-  char buf[256];
-  if (sscanf(line.c_str(), "Verify=%255s", buf) == 1) { return Task{Task::VERIFY, .verifyPath=buf}; }
-
-  const char* tail = line.c_str();
+  string tail = line;
   
-  if (sscanf(tail, "B1=%u,B2=%u;%n", &B1, &B2, &pos) == 2 ||
-      sscanf(tail, "B1=%u;%n", &B1, &pos) == 1) {
-    tail += pos;
+  if (sscanf(tail.c_str(), "B1=%u,B2=%u;%n", &B1, &B2, &pos) == 2
+      || sscanf(tail.c_str(), "B1=%u;%n", &B1, &pos) == 1
+      || sscanf(tail.c_str(), "B2=%u;%n", &B2, &pos) == 1) {
+    tail = tail.substr(pos);
   }
 
   char kindStr[32] = {0};
-  if(sscanf(tail, "%11[a-zA-Z]=%n", kindStr, &pos) == 1) {
+  if(sscanf(tail.c_str(), "%11[a-zA-Z]=%n", kindStr, &pos) == 1) {
     string kind = kindStr;
-    tail += pos;
-    if (kind == "PRP" || kind == "PFactor" || kind == "Pfactor" || kind == "DoubleCheck") {
-      char AIDStr[64] = {0};
-      if (sscanf(tail, "%32[0-9a-fA-FN/],1,2,%u,-1,%u,%u", AIDStr, &exp, &bitLo, &wantsPm1) == 4
-          || sscanf(tail, "%32[0-9a-fA-FN/],%u", AIDStr, &exp) == 2
-          || (AIDStr[0]=0, sscanf(tail, "%u", &exp)) == 1) {
-        string AID = AIDStr;
-        if (AID == "N/A" || AID == "0") { AID = ""; }
-        Task::Kind k;
-        if (kind == "PRP") k = Task::PRP;
-        else if (kind == "DoubleCheck") k = Task::LL;
-        else k = Task::PM1;
-        return Task(k, exp, AID, line, B1, B2, bitLo, wantsPm1);
+    tail = tail.substr(pos);
+    if (kind == "PRP" or kind == "PRPDC") {
+      if (tail.find('"') != string::npos) {
+        log("GpuOwl does not support PRP-CF!\n");
+      } else {
+        char AIDStr[64] = {0};
+        if (sscanf(tail.c_str(), "%32[0-9a-fA-F],1,2,%u,-1,%u,%u", AIDStr, &exp, &bitLo, &wantsPm1) == 4
+            || (AIDStr[0]=0, sscanf(tail.c_str(), "N/A,1,2,%u,-1,%u,%u", &exp, &bitLo, &wantsPm1) == 3)
+            || (AIDStr[0]=0, sscanf(tail.c_str(), "1,2,%u,-1,%u,%u", &exp, &bitLo, &wantsPm1) == 3)
+            || sscanf(tail.c_str(), "%32[0-9a-fA-F],%u,%u,%u", AIDStr, &exp, &bitLo, &wantsPm1) == 4
+            || (AIDStr[0]=0, sscanf(tail.c_str(), "N/A,%u,%u,%u", &exp, &bitLo, &wantsPm1) == 3)
+            || (AIDStr[0]=0, sscanf(tail.c_str(), "%u,%u,%u", &exp, &bitLo, &wantsPm1) == 3)
+            || (AIDStr[0]=0, sscanf(tail.c_str(), "%u", &exp)) == 1) {
+          string AID = AIDStr;
+          if (AID == "N/A" || AID == "0") { AID = ""; }
+          return {{Task::PRP, exp, AID, line, B1, B2, bitLo, wantsPm1}};
+        }
       }
     }
   }
@@ -55,15 +56,17 @@ std::optional<Task> parse(const std::string& line) {
   return std::nullopt;
 }
 
-void remove(const std::string& s) { ::remove(s.c_str()); }
-void rename(const std::string& a, const std::string& b) { ::rename(a.c_str(), b.c_str()); }
+fs::path operator+(fs::path p, const std::string& tail) {
+  p += tail;
+  return p;
+}
 
-bool deleteLine(const std::string& fileName, const std::string& targetLine) {
+bool deleteLine(const fs::path& fileName, const std::string& targetLine) {
   assert(!targetLine.empty());
   bool lineDeleted = false;
   {
     auto fo{File::openWrite(fileName + "-tmp")};
-    for (const string& line : File::openRead(fileName, true)) {
+    for (const string& line : File::openReadThrow(fileName)) {
       if (!lineDeleted && line == targetLine) {
         lineDeleted = true;
       } else {
@@ -73,16 +76,16 @@ bool deleteLine(const std::string& fileName, const std::string& targetLine) {
   }
 
   if (!lineDeleted) {
-    log("'%s': could not find the line '%s' to delete\n", fileName.c_str(), targetLine.c_str());
+    log("'%s': could not find the line '%s' to delete\n", fileName.string().c_str(), targetLine.c_str());
     return false;
   }
-  remove(fileName + "-bak");
-  rename(fileName, fileName + "-bak");
-  rename(fileName + "-tmp", fileName);  
+  fs::remove(fileName + "-bak");
+  fs::rename(fileName, fileName + "-bak");
+  fs::rename(fileName + "-tmp", fileName);  
   return true;
 }
 
-std::optional<Task> firstGoodTask(const std::string& fileName) {
+std::optional<Task> firstGoodTask(const fs::path& fileName) {
   for (const string& line : File::openRead(fileName)) {
     if (optional<Task> maybeTask = parse(line)) { return maybeTask; }
   }
@@ -96,26 +99,13 @@ std::optional<Task> Worktodo::getTask(Args &args) {
   
  again:
   // Try to get a task from the local worktodo.txt
-  if (optional<Task> task = firstGoodTask(worktodoTxt)) {
-    if (task->kind == Task::PRP && task->wantsPm1) {
-      // Some worktodo tasks can be expanded into subtasks:
-      // PRP with wantsPm1>0 is expanded into a sequence of P-1 followed by PRP with wantsPm1==0.
-      Task pm1{Task::PM1, task->exponent, task->AID, "", task->B1, task->B2, task->bitLo, task->wantsPm1};
-      pm1.adjustBounds(args);
-      task->wantsPm1 = 0;
-      // File::append(worktodoTxt, "#"s + task.line);
-      File::append(worktodoTxt, string(pm1) + '\n');
-      File::append(worktodoTxt, string(*task) + '\n');
-      deleteLine(worktodoTxt, task->line);
-      goto again;
-    }
-    
+  if (optional<Task> task = firstGoodTask(worktodoTxt)) {    
     task->adjustBounds(args);
     return task;
   }
   
   if (!args.masterDir.empty()) {
-    string globalWorktodo = args.masterDir + '/' + worktodoTxt;
+    fs::path globalWorktodo = args.masterDir / worktodoTxt;
     if (optional<Task> task = firstGoodTask(globalWorktodo)) {
       File::append(worktodoTxt, task->line);
       deleteLine(globalWorktodo, task->line);
@@ -124,28 +114,6 @@ std::optional<Task> Worktodo::getTask(Args &args) {
   }
   
   return std::nullopt;
-}
-
-void Worktodo::deletePRP(u32 exponent) {
-  std::string fileName = "worktodo.txt";
-  bool changed = false;
-  {
-    auto fo{File::openWrite(fileName + "-tmp")};
-    for (const string& line : File::openRead(fileName, true)) {
-      if (optional<Task> task = parse(line); task && task->exponent == exponent && task->kind == Task::PRP) {
-        changed = true;
-        log("task removed: \"%s\"\n", rstripNewline(line).c_str());
-      } else {
-        fo.write(line);
-      }
-    }
-  }
-
-  if (changed) {
-    remove(fileName + "-bak");
-    rename(fileName, fileName + "-bak");
-    rename(fileName + "-tmp", fileName);  
-  }
 }
 
 bool Worktodo::deleteTask(const Task &task) {

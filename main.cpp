@@ -2,13 +2,13 @@
 
 #include "Args.h"
 #include "Task.h"
-#include "Background.h"
 #include "Worktodo.h"
 #include "common.h"
 #include "File.h"
 #include "version.h"
 #include "AllocTrac.h"
 #include "typeName.h"
+#include "log.h"
 
 #include <cstdio>
 #include <experimental/filesystem>
@@ -17,7 +17,7 @@ extern string globalCpuName;
 
 namespace fs = std::filesystem;
 
-void readConfig(Args& args, const std::string& path, bool doLog) {
+static void readConfig(Args& args, const fs::path& path, bool doLog) {
   if (auto file = File::openRead(path)) {
     // log("reading %s\n", path.c_str());
     while (true) {
@@ -30,20 +30,16 @@ void readConfig(Args& args, const std::string& path, bool doLog) {
       }
     }
   } else {
-    if (doLog) { log("Note: not found '%s'\n", path.c_str()); }
+    if (doLog) { log("Note: not found '%s'\n", path.string().c_str()); }
   }
 }
 
 int main(int argc, char **argv) {
   initLog();
-  log("gpuowl %s\n", VERSION);
-  
-  Background background;
+  log("GpuOwl VERSION %s\n", VERSION);
 
   int exitCode = 0;
 
-  std::atomic<u32> factorFoundForExp = 0;
-  
   try {
     string mainLine = Args::mergeArgs(argc, argv);
     {
@@ -53,16 +49,17 @@ int main(int argc, char **argv) {
       initLog("gpuowl.log");
     }
 
-    string poolDir{};
-    {
-      Args args;
-      readConfig(args, "config.txt", false);
-      args.parse(mainLine);
-      poolDir = args.masterDir;
-    }
+    log("GpuOwl VERSION %s\n", VERSION);
+
+    fs::path poolDir = [&mainLine](){
+                         Args args;
+                         readConfig(args, "config.txt", false);
+                         args.parse(mainLine);
+                         return args.masterDir;
+                       }();
 
     Args args;
-    if (!poolDir.empty()) { readConfig(args, poolDir + '/' + "config.txt", true); }
+    if (!poolDir.empty()) { readConfig(args, poolDir / "config.txt", true); }
     readConfig(args, "config.txt", true);
     if (!mainLine.empty()) {
       log("config: %s\n", mainLine.c_str());
@@ -74,15 +71,11 @@ int main(int argc, char **argv) {
     if (args.maxAlloc) { AllocTrac::setMaxAlloc(args.maxAlloc); }
     
     if (args.prpExp) {
-      Worktodo::makePRP(args, args.prpExp).execute(args, background, factorFoundForExp);
-    } else if (args.pm1Exp) {
-      Worktodo::makePM1(args, args.pm1Exp).execute(args, background, factorFoundForExp);
-    } else if (args.llExp) {
-      Worktodo::makeLL(args, args.llExp).execute(args, background, factorFoundForExp);
+      Worktodo::makePRP(args, args.prpExp).execute(args);
     } else if (!args.verifyPath.empty()) {
-      Worktodo::makeVerify(args, args.verifyPath).execute(args, background, factorFoundForExp);
+      Worktodo::makeVerify(args, args.verifyPath).execute(args);
     } else {
-      while (auto task = Worktodo::getTask(args)) { task->execute(args, background, factorFoundForExp); }
+      while (auto task = Worktodo::getTask(args)) { task->execute(args); }
     }
   } catch (const char *mes) {
     log("Exiting because \"%s\"\n", mes);
@@ -92,8 +85,8 @@ int main(int argc, char **argv) {
     log("Unexpected exception\n");
   }
 
-  background.wait();
-  if (factorFoundForExp) { Worktodo::deletePRP(factorFoundForExp); }
+  // background.wait();
+  // if (factorFoundForExp) { Worktodo::deletePRP(factorFoundForExp); }
   log("Bye\n");
   return exitCode; // not used yet.
 }

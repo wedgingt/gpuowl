@@ -73,6 +73,17 @@ public:
 
   Buffer(Buffer&& rhs) = default;
 
+  void zero(size_t len = 0) {
+    assert(len <= this->size);
+    T zero = 0;
+    fillBuf(queue->get(), this->get(), &zero, sizeof(T), (len ? len : this->size) * sizeof(T));
+  }
+
+  void set(T value) {
+    zero();
+    fillBuf(queue->get(), this->get(), &value, sizeof(T), sizeof(T));
+  }
+
   // device-side copy
   void operator<<(const ConstBuffer<T>& rhs) {
     assert(this->size == rhs.size);
@@ -83,7 +94,7 @@ public:
 template<typename T>
 class HostAccessBuffer : public Buffer<T> {
 public:
-  using Buffer<T>::operator=;
+  // using Buffer<T>::operator=;
   using Buffer<T>::operator<<;
   
   HostAccessBuffer(QueuePtr queue, std::string_view name, size_t size)
@@ -106,14 +117,13 @@ public:
   }
 
   // sync write
-  void operator=(const vector<T>& vect) {
+  void write(const vector<T>& vect) {
     assert(this->size >= vect.size());
-    write(this->queue->get(), true, this->get(), vect.size() * sizeof(T), vect.data());
+    ::write(this->queue->get(), true, this->get(), vect.size() * sizeof(T), vect.data());
   }
 
   operator vector<T>() const { return read(); }
 
   // async read
-  void operator>>(vector<T>& out) const { readAsync(out); }
-
+  // void operator>>(vector<T>& out) const { readAsync(out); }
 };

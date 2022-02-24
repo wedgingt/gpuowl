@@ -15,8 +15,12 @@ std::string GCD(u32 exp, const std::vector<u32>& words, u32 sub = 0);
 vector<bool> bitsMSB(const mpz_class& a);
 
 vector<bool> powerSmoothMSB(u32 exp, u32 B1);
+vector<bool> powerSmoothLSB(u32 exp, u32 B1);
 
-// Returns jacobi-symbol(words - 2, 2**exp - 1)
+// Bitlen of powerSmooth
+u32 powerSmoothBits(u32 exp, u32 B1);
+
+// Returns jacobi-symbol(words, 2**exp - 1)
 int jacobi(u32 exp, const std::vector<u32>& words);
 
 inline mpz_class mpz64(u64 h) {
@@ -25,3 +29,8 @@ inline mpz_class mpz64(u64 h) {
   ret += u32(h);
   return ret;
 }
+
+// Split the "k" of a P-1 factor of the form 2*k*exponent +1 into subfactors.
+vector<u32> factorize(const string& str, u32 exponent, u32 B1, u32 B2);
+
+double log2(const string& str);

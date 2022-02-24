@@ -1,27 +1,12 @@
-// Copyright Mihai Preda
-
 #include "Pm1Plan.h"
 
-#include <string>
-#include <vector>
-#include <numeric>
+#include <tuple>
 #include <array>
 #include <cassert>
-#include <algorithm>
-#include <initializer_list>
-#include <bitset>
+#include <numeric>
 
-using namespace std;
-
-static constexpr const u32 D = 30030;
-static_assert(D == 2*3*5*7*11*13);
-static constexpr const u32 J = 2880;
-static_assert(J == 1*2*4*6*10*12 / 2);
-
-// Simple Erathostene's sieve.
-static vector<bool> primeBits(u32 B1, u32 B2) {
-  assert(B1 < B2);
-
+vector<bool> Pm1Plan::sieve(u32 B1, u32 B2) {
+  assert(B1 && B1 < B2);
   vector<bool> bits(B2 + 1);
   bits[0] = bits[1] = true;
   for (u32 p = 0; p <= B2; ++p) {
@@ -31,128 +16,299 @@ static vector<bool> primeBits(u32 B1, u32 B2) {
 
     if (p <= B1) { bits[p] = true; }
 
-    if (u64(p) * p <= B2) { for (u32 i = p * p; i <= B2; i += p) { bits[i] = true; }}
+    if (p < (1u << 16) && p * p <= B2) { for (u32 i = p * p; i <= B2; i += p) { bits[i] = true; }}
   }
   bits.flip();
   return bits;
 }
 
-// 'value' is a small multiple of a prime: B1 < prime <= B2. Return that prime.
-static u32 basePrime(u32 B1, u32 value) {
-  for (u32 k : {17, 19, 23, 29, 31, 37, 41, 43, 47}) {
-    if (value < B1 * k) { return value; }
-    if (value % k == 0) { return value / k; }
-  }
-  return value;
-}
+namespace {
+
+template<u32 D> constexpr bool isRelPrime(u32 j);
+template<> constexpr bool isRelPrime<210>(u32 j)  { return j % 2 && j % 3 && j % 5 && j % 7; }
+template<> constexpr bool isRelPrime<330>(u32 j)  { return j % 2 && j % 3 && j % 5          && j % 11; }
+template<> constexpr bool isRelPrime<462>(u32 j)  { return j % 2 && j % 3          && j % 7 && j % 11; }
+template<> constexpr bool isRelPrime<770>(u32 j)  { return j % 2          && j % 5 && j % 7 && j % 11; }
+template<> constexpr bool isRelPrime<2310>(u32 j) { return j % 2 && j % 3 && j % 5 && j % 7 && j % 11; }
 
 template<typename T>
 u32 sum(const T &v) { return accumulate(v.begin(), v.end(), 0); }
 
-static u32 blockFor(u32 B1) { return (B1 + D / 2) / D; }
+// Repeatedly divides "pos" by "F" while it can, keeping it above B1.
+template<u32 F>
+u32 reduce(u32 B1, u32 pos) {
+  while (pos > B1 * F && pos % F == 0) { pos /= F; }
+  return pos;
+}
 
-class PrimeBits {
-public:
-  vector<bool> bits;
-  u32 B1, B2;
-
-public:
-  PrimeBits(u32 B1, u32 B2) : bits(primeBits(B1, B2)), B1(B1), B2(B2) {}
-  
-  void expand() { for (u32 p = B1 + 1; p <= B2 / 17; ++p) { if (bits[p]) { set(p, true); }}}
-
-  void set(u32 value, bool what) {
-    assert(value <= B2 && bits[value]);
-    u32 p = basePrime(B1, value);
-    bits[p] = what;
-
-    for (u32 k : {17, 19, 23, 29, 31, 37, 41, 43, 47}) {
-      u32 value = p * k;
-      if (value > B2) { break; }
-      bits[value] = what;
-    }
+constexpr u32 firstMissingFactor(u32 D) {
+  switch (D) {
+  case 210:
+  case 420:
+    return 11;
+      
+  case 330:
+  case 660:
+    return 7;
+      
+  case 462:
+  case 2*462:
+    return 5;
+      
+  case 770:
+  case 2*770:
+    return 3;
+      
+  case 2310:
+    return 13;
   }
+  assert(false);
+}
 
-  template<typename T>
-  vector<bitset<J>> select(const T &cond) {
-    u32 beginBlock = blockFor(B1);
-    u32 endBlock   = blockFor(B2 - 1) + 1;
-    auto jset = getJset();
+// Repeatedly divides "pos" by the smallest missing factor of "D".
+u32 reduce(u32 D, u32 B1, u32 pos) {
+  switch (D) {
+  case 210:
+  case 420:
+    return reduce<11>(B1, pos);
+      
+  case 330:
+  case 660:
+    return reduce<7>(B1, pos);
+      
+  case 462:
+  case 2*462:
+    return reduce<5>(B1, pos);
+      
+  case 770:
+  case 2*770:
+    return reduce<3>(B1, pos);
+      
+  case 2310:
+    return reduce<13>(B1, pos);
+  }
+  assert(false);
+}
 
-    vector<bitset<J>> ret;
+// Returns whether GCD(D, j)==1.
+bool isRelPrime(u32 D, u32 j) {
+  switch (D) {
+  case 210:
+  case 2*210:
+    return isRelPrime<210>(j);
+  
+  case 330:
+  case 2*330:
+    return isRelPrime<330>(j);
+    
+  case 462:
+  case 2*462:
+    return isRelPrime<462>(j);
+    
+  case 770:
+  case 2*770:
+    return isRelPrime<770>(j);
+    
+  case 2310:
+    return isRelPrime<2310>(j);
+  }
+  assert(false);
+}
 
-    for (u32 block = beginBlock; block < endBlock; ++block) {
-      bitset<J> blockBits;
-      u32 pos = 0;
-      for (u32 j : jset) {
-        assert(j >= 1 && j < D / 2);
-        u32 a = block * D + j;
-        u32 b = block * D - j;
-        bool onA = a <= B2 && bits[a];
-        bool onB = b <= B2 && bits[b];
-        if (cond(onA, onB)) {
-          blockBits[pos] = true;
-          if (onA) { set(a, false); }
-          if (onB) { set(b, false); }
-        }
-        ++pos;
+}
+
+// Returns the minimal number of buffers J needed for D.
+u32 Pm1Plan::minBufsFor(u32 D) {
+  switch (D) {
+  case 210: return 24;
+  case 2*210: return 2*24;
+  case 330: return 40;
+  case 2*330: return 2*40;
+  case 462: return 60;
+  case 2*462: return 2*60;
+  case 770: return 120;
+  case 2*770: return 2*120;
+  case 2310: return 240;
+  }
+  assert(false);
+}
+
+u32 Pm1Plan::reduce(u32 pos) const { return ::reduce(D, B1, pos); }
+template<u32 F> u32 Pm1Plan::reduce(u32 pos) const { return ::reduce<F>(B1, pos); }
+
+Pm1Plan::Pm1Plan(u32 argsD, u32 nBuf, u32 B1, u32 B2, vector<bool>&& primeBits)
+  : nBuf{min(nBuf, MAX_BUFS)}, primeBits{std::move(primeBits)}, D{getD(argsD, nBuf)}, B1{B1}, B2{B2}, jset{makeJset()} {
+  assert(nBuf >= 24);
+  assert(nBuf >= minBufsFor(D));
+  assert(B1 < B2);
+
+  // Extend the primeBits vector with guard zero bits, so that makePlan() does not read past-the-end.
+  for (u32 i = 0; i < 2 * jset.back() + 1; ++i) { this->primeBits.push_back(false); }
+}
+
+Pm1Plan::Pm1Plan(u32 D, u32 nBuf, u32 B1, u32 B2) : Pm1Plan{D, nBuf, B1, B2, sieve(B1, B2)} {
+}
+
+vector<u32> Pm1Plan::makeJset() {
+  vector<u32> jset;
+  assert(nBuf >= minBufsFor(D));
+  for (u32 j = 1; jset.size() < nBuf; j += 2) {
+    if (isRelPrime(D, j)) { jset.push_back(j); }
+  }
+  return jset;
+}
+
+u32 Pm1Plan::primeAfter(u32 b) const {
+  while (!primeBits[++b]);
+  return b;
+}
+
+u32 Pm1Plan::primeBefore(u32 b) const {
+  while (!primeBits[--b]);
+  return b;
+}
+
+// Returns the prime hit by "a", or 0.
+u32 Pm1Plan::hit(const vector<bool>& primes, u32 a) {
+  u32 r = 0;
+  return primes[r=a]
+    || primes[r=reduce(a)]
+    || primes[r=reduce<13>(a)]
+    || primes[r=reduce<17>(a)]
+    || primes[r=reduce<19>(a)]
+    || primes[r=reduce<23>(a)]
+    || primes[r=reduce<29>(a)]
+#if 0
+    || primes[r=reduce<31>(a)]
+    || primes[r=reduce<37>(a)]
+    || primes[r=reduce<41>(a)]
+    || primes[r=reduce<43>(a)]
+#endif
+    ? r : 0;
+}
+
+// The largest block that covers "b" (the initial block).
+u32 Pm1Plan::lowerBlock(u32 b) const { return (b + jset.back()) / D; }
+  
+// The smallest block that cover "b" (the final block).
+u32 Pm1Plan::upperBlock(u32 b) const { return (b - jset.back()) / D + 1; }
+
+template<typename Fun>
+void Pm1Plan::scan(const vector<bool>& primes, u32 beginBlock, vector<BitBlock>& selected, Fun fun) {
+  for (u32 block = selected.size() - 1; block >= beginBlock; --block) {
+    BitBlock& blockBits = selected[block];
+    const u32 base = block * D;
+    
+    for (u32 pos = 0, end = jset.size(); pos < end; ++pos) {
+      u32 j = jset[pos];
+      u32 a = base - j;
+      u32 b = base + j;      
+      u32 p1 = hit(primes, a);
+      u32 p2 = hit(primes, b);
+      if (fun(p1, p2)) {
+        assert(!blockBits[pos]);
+        blockBits[pos] = true;
       }
-      ret.push_back(std::move(blockBits));
     }
-    return ret;
   }
-
-  u32 size() const { return sum(bits); }
-};
-
-vector<bool> boolOr(const vector<bool> &a, const vector<bool> &b) {
-  assert(a.size() == b.size());
-  vector<bool> ret = a;
-  for (u32 i = 0; i < b.size(); ++i) {
-    if (b[i]) { ret[i] = true; }
-  }
-  return ret;
 }
 
-static u32 countSum(const vector<bitset<2880>>& v) {
-  return accumulate(v.begin(), v.end(), 0, [](u32 a, const auto& b) { return a + b.count(); });
-}
+pair<u32, vector<Pm1Plan::BitBlock>> Pm1Plan::makePlan() {  
+  // In the unlikely case that either B1 or B2 is prime:
+  // B1 was included in P1, so excluded in P2.
+  // B2 is included in P2.
 
-tuple<u32, u32, vector<bitset<2880>>> makePm1Plan(u32 B1, u32 B2) {
-  // poor man's cache
-  static u32 cacheB1 = 0, cacheB2 = 0;
-  static tuple<u32, u32, vector<bitset<2880>>> cachePlan;
+  u32 lastPrime = primeBefore(B2 + 1);
+  u32 lastBlock   = upperBlock(lastPrime);
+  u32 lastCovered = lastBlock * D + jset.back();
+  // log("last %u %u %u %u %u\n", lastPrime, lastBlock, lastCovered, u32(primeBits.size()), jset.back());
+  assert(lastCovered < primeBits.size());
 
-  if (B1 == cacheB1 && B2 == cacheB2) { return cachePlan; }
+  // All primes <= cutValue can be transposed by mulitplying with firstMissingFactor.
+  u32 cutValue = lastCovered / firstMissingFactor(D);
+  u32 startValue = max(primeAfter(B1), cutValue + 1);
   
-  PrimeBits bits(B1, B2);
-  u32 nPrimes = bits.size();
-  bits.expand();
-  u32 nExpanded = bits.size();
+  u32 beginBlock = lowerBlock(startValue);
+  u32 endBlock = lastBlock + 1;
 
-  vector<bitset<2880>> doubles = bits.select([](bool a, bool b) { return a && b; });
-  u32 nDoubles = countSum(doubles);
-  u32 leftAfterDoubles = bits.size();
+  assert(beginBlock < endBlock);
 
-  vector<bitset<2880>> singles = bits.select([](bool a, bool b) { return a || b; });
-  u32 nSingles = countSum(singles);
+  auto primes = primeBits; // use a copy in which we'll clear the primes as we cover them.
+  
+  const u32 nPrimes = sum(primes);
 
-  vector<bitset<2880>> selected;
-  transform(doubles.begin(), doubles.end(), singles.begin(), back_inserter(selected),
-          [](const auto& a, const auto& b){ return a | b; });
+  vector<BitBlock> selected(endBlock);
 
-  u32 total = countSum(selected);
+  u32 nPair = 0, nSingle = 0;
+  
+  for (int rep = 0; rep < 4; ++rep) {
+    
+    vector<bool> oneHit(primes.size()), twoHit(primes.size());
 
-  log("P-1 (B1=%u, B2=%u, D=%u): primes %u, expanded %u, doubles %u (left %u), singles %u, total %u (%.0f%%)\n",
-      B1, B2, D, nPrimes, nExpanded, nDoubles, leftAfterDoubles, nSingles, total, total / float(nPrimes) * 100);
+    scan(primes, beginBlock, selected, [&oneHit, &twoHit](u32 p1, u32 p2) {
+      if (p1 && p2) {
+        assert(p1 != p2);
+        if (oneHit[p1]) {
+          twoHit.at(p1) = true;
+        } else {
+          oneHit.at(p1) = true;
+        }
 
-  assert(total == nDoubles + nSingles);
-  assert(bits.size() == 0); // all primes covered.
+        if (oneHit[p2]) {
+          twoHit.at(p2) = true;
+        } else {
+          oneHit.at(p2) = true;
+        }
+      }
+      return false;
+    });
 
-  u32 beginBlock = blockFor(B1);
+    scan(primes, beginBlock, selected, [&primes, &twoHit, &nPair](u32 p1, u32 p2) {
+      if (p1 && p2 && (!twoHit[p1] || !twoHit[p2])) {
+        ++nPair;
+        primes[p1] = primes[p2] = false;
+        return true;
+      } else {
+        return false;
+      }
+    });
+  }
 
-  cachePlan = {beginBlock, total, selected};
-  cacheB1 = B1;
-  cacheB2 = B2;
-  return cachePlan;
-};
+  scan(primes, beginBlock, selected, [&primes, &nPair](u32 p1, u32 p2) {
+    if (p1 && p2) {
+      ++nPair;
+      primes[p1] = primes[p2] = false;
+      return true;
+    } else {
+      return false;
+    }
+  });
+  
+  scan(primes, beginBlock, selected, [&primes, &nSingle](u32 p1, u32 p2) {
+    if (p1 || p2) {
+      assert(!(p1 && p2));
+      ++nSingle;
+      primes[p1] = primes[p2] = false;
+      return true;
+    } else {
+      return false;
+    }
+  });
+  
+  assert(sum(primes) == 0);  // all primes are covered.
+  assert(nPair * 2 + nSingle == nPrimes);
+  
+  u32 nBlocks = endBlock - beginBlock;
+
+  // The block transition cost is approximated as 2 MULs.
+  float cost = nPair + nSingle + 2 * nBlocks;
+  float percentPaired = 100 * (1 - nSingle / float(nPrimes));
+
+  u32 firstPrime = primeAfter(B1);
+  log("D=%u: %u primes in [%u, %u]: cost %.2fM (pair: %u, single: %u, (%.0f%% paired), blocks: %u)\n",
+      D, nPrimes, firstPrime, lastPrime,
+      cost * (1.0f / 1'000'000),
+      nPair, nSingle, percentPaired, nBlocks);
+  
+  return {beginBlock, selected};
+}

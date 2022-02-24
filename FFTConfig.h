@@ -13,6 +13,8 @@
 string numberK(u32 n);
 
 struct FFTConfig {
+  static constexpr const float MIN_BPW = 6;
+
   // On 2020-03-30, I examined the middle=10 FFTs from 1.25M to 80M.
   // On this date, exponent 95460001 had an average roundoff error of 0.2441.
   // This should be periodically tested to make sure rocm optimizer hasn't made accuracy worse.
@@ -35,6 +37,7 @@ struct FFTConfig {
   // pErr around 0.2%.  For the MM_CHAIN crossovers we target an even more conservative pErr since
   // the penalty for passing these "mini-crossovers" is quite small.
   static u32 getMaxExp(u32 fftSize, u32 middle) { return
+      middle == 2 ? fftSize * (19.0766 - 0.279 * log2(fftSize / (1 * 1024 * 1024))) :
                 middle == 3 ? fftSize * (19.0766 - 0.279 * log2(fftSize / (1.5 * 1024 * 1024))) :
                 middle == 4 ? fftSize * (18.9862 - 0.279 * log2(fftSize / (2.0 * 1024 * 1024))) :
                 middle == 5 ? fftSize * (18.8482 - 0.279 * log2(fftSize / (2.5 * 1024 * 1024))) :

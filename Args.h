@@ -6,6 +6,9 @@
 
 #include <string>
 #include <set>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 class Args {
 public:
@@ -13,7 +16,7 @@ public:
 
   enum {CARRY_AUTO = 0, CARRY_SHORT, CARRY_LONG};
 
-  void parse(string line);
+  void parse(const string& line);
   void setDefaults();
   bool uses(const std::string& key) const { return flags.count(key); }
   
@@ -21,8 +24,7 @@ public:
   string cpu;
   string dump;
   string dir;
-  string resultsFile = "results.txt";
-  string masterDir;
+  
   string uid;
   string binaryFile;
   string verifyPath;
@@ -32,30 +34,38 @@ public:
   
   bool timeKernels = false;
   bool cudaYield = false;
-  bool cleanup = false;
   bool noSpin = false;
-  bool safeMath = false;
+  bool safeMath = true;
+  bool clean = true;
   
-  u32 proofPow = 0;
+  u32 proofPow = 8;
+  u32 proofVerify = 9;
+
+  fs::path resultsFile = "results.txt";
+  fs::path masterDir;
+  fs::path tmpDir = ".";
+  fs::path proofResultDir = "proof";
+  fs::path proofToVerifyDir = "proof-tmp";
   
+  bool keepProof = false;
+
   int carry = CARRY_AUTO;
   u32 blockSize = 0;
   u32 logStep   = 0;
-  u32 jacobiStep = 0;
   string fftSpec;
 
-  u32 B1 = 1000000;
+  u32 B1 = 0;
   u32 B2 = 0;
-  u32 B2_B1_ratio = 30;
-
-  u32 prpExp = 0;
-  u32 pm1Exp = 0;
-  u32 llExp = 0;
+  u32 B2_B1_ratio = 20;
+  u32 D = 0;
   
-  u32 maxBuffers = 0;
+  u32 prpExp = 0;
+  
   size_t maxAlloc = 0;
 
   u32 iters = 0;
-
+  u32 nSavefiles = 20;
+  u32 startFrom = u32(-1);
+  
   void printHelp();
 };

@@ -80,21 +80,23 @@ public:
 
   using Profile = std::vector<std::pair<TimeInfo, std::string>>;
   Profile getProfile() {
-    Profile profile;
-    for (auto& [name, info] : timeMap) { profile.emplace_back(info, name); }
-    std::sort(profile.begin(), profile.end());
-    return profile;
+    Profile p;
+    for (auto& [name, info] : timeMap) { p.emplace_back(info, name); }
+    std::sort(p.begin(), p.end());
+    return p;
   }
 
   void clearProfile() {
     events.clear();
     timeMap.clear();
   }
-  
+
+  /*
   template<typename T> void zero(Buffer<T>& buf, size_t sizeOrFull = 0) {
     auto size = sizeOrFull ? sizeOrFull : buf.size;
     assert(size <= buf.size);
     T zero = 0;
     fillBuf(get(), buf.get(), &zero, sizeof(T), size * sizeof(T));
   }
+  */
 };

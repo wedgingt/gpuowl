@@ -1,29 +1,69 @@
 // Copyright Mihai Preda
+
 #pragma once
 
 #include "common.h"
 
 #include <vector>
-#include <tuple>
 #include <bitset>
-#include <cassert>
 
-using std::vector;
+class Pm1Plan {
+  static constexpr const u32 MAX_BUFS = 1024;
 
-// Generate a P-1 second stage plan.
-// that covers the primes in (B1, B2], with a block of size D.
-// Returns the index of the first block, the total nb. of points selected, and vectors of selected bits per block.
-std::tuple<u32, u32, vector<std::bitset<2880>>> makePm1Plan(u32 B1, u32 B2);
-
-constexpr bool isRelPrime(u32 j) { return j % 2 && j % 3 && j % 5 && j % 7 && j % 11 && j % 13; }
-
-// JSet : the values 1 <= x < D/2 where GCD(x, D) == 1
-constexpr array<u32, 2880> getJset() {
-  u32 D = 30030;
+public:
+  using BitBlock = bitset<MAX_BUFS>;
   
-  array<u32, 2880> jset{};
-  u32 pos = 0;
-  for (u32 j = 1; j < D / 2; j += 2) { if (isRelPrime(j)) { jset[pos++] = j; }}
-  assert(pos == 2880);
-  return jset;
-}
+  const u32 nBuf;  // number of precomputed "big" GPU buffers
+
+  vector<bool> primeBits; // Bits indicating primes in [B1,B2].
+  
+  vector<u32> makeJset();  // A set of nBuf values that are relative prime with "D".
+  
+  // vector<bool> makePrimeBits();  // Generate a vector of bits indicating primes between B1 and B2.
+  
+  u32 primeAfter(u32 b) const;   // return smallest prime > b
+  u32 primeBefore(u32 b) const;  // return largest prime < b
+
+  // The largest block that covers "b" (the initial block).
+  u32 lowerBlock(u32 b) const;
+  
+  // The smallest block that cover "b" (the final block).
+  u32 upperBlock(u32 b) const;
+
+  // Repeatedly divide "pos" by the smallest prime not-factor of D.
+  u32 reduce(u32 pos) const;
+
+  // Repeatedly divide "pos" by "F".
+  template<u32 F> u32 reduce(u32 pos) const;
+
+  // Returns the prime hit by "a", or 0.
+  u32 hit(const vector<bool>& primes, u32 a);
+
+  template<typename Fun>
+  void scan(const vector<bool>& primes, u32 beginBlock, vector<Pm1Plan::BitBlock>& selected, Fun fun);
+  
+public:
+  static u32 minBufsFor(u32 D);
+  static u32 getD(u32 argsD, u32 nBufs) { return argsD ? argsD : (nBufs >= minBufsFor(330) ? 330 : 210); }
+
+  // Simple Erathostene's sieve restricted to the range [B1, B2].
+  // Returns a vector of bits, with the bit corresponding to a prime set.
+  static vector<bool> sieve(u32 bound) { return sieve(1, bound); }
+  
+  // Only the bits between B1 and B2 are set where there is a prime.
+  static vector<bool> sieve(u32 B1, u32 B2);
+
+  const u32 D;
+  const u32 B1;
+  const u32 B2;
+  const vector<u32> jset; // The set of relative primes to "D" corresponding to the precomputed buffers.
+
+  
+  Pm1Plan(u32 D, u32 nBuf, u32 B1, u32 B2);
+  Pm1Plan(u32 D, u32 nBuf, u32 B1, u32 B2, vector<bool>&& primeBits);
+
+  // Returns a sequence of BitBlocks, one entry per block starting with block=0.
+  // Each BitBlock has a bit set if the corresponding buffer is selected for multiplication.
+  // Also return beginBlock.
+  pair<u32, vector<BitBlock>> makePlan();
+};
