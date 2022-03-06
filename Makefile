@@ -18,6 +18,7 @@ CUDA_INCL = -I/usr/local/cuda-10/include
 else
 error: FORCE
 	@echo Add location of CUDA libraries and include files to Makefile
+	env
 	exit 1
 endif
 endif
