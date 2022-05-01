@@ -11,7 +11,7 @@
 #include "log.h"
 
 #include <cstdio>
-#include <experimental/filesystem>
+#include <filesystem>
 
 extern string globalCpuName;
 
@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
     {
       Args args;
       args.parse(mainLine);
-      if (!args.dir.empty()) { experimental::filesystem::current_path(args.dir); }
+      if (!args.dir.empty()) { filesystem::current_path(args.dir); }
       initLog("gpuowl.log");
     }
 
