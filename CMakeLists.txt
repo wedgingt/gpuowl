@@ -18,7 +18,6 @@ add_executable(gpuowl_mirror
         Gpu.cpp
         Gpu.h
         gpuowl.cl
-        gpuowl.cpp
         kernel.h
         Pm1Plan.cpp
         Pm1Plan.h
