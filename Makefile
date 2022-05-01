@@ -47,6 +47,9 @@ DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
+all: .d version.inc gpuowl
+	echo $@ > $@
+
 gpuowl: $(OWL_OBJS)
 	$(LINK) $^ -o $@ $(LDFLAGS)
 
@@ -59,18 +62,18 @@ D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 
 clean:
 	rm -f $(OBJS) gpuowl gpuowl-win.exe
+	rm -rf $(DEPDIR)
 
-%.$(O) : %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp
+%.o: %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp version.inc
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	$(POSTCOMPILE)
 
-$(DEPDIR)/%.d: version.inc ;
-.PRECIOUS: $(DEPDIR)/%.d
+$(DEPDIR)/%.d: %.cpp
 
 .d: FORCE
 	mkdir -p $(DEPDIR)
 
-version.inc: .d
+version.inc: FORCE
 	echo \"`git describe --tags --long --dirty --always`\" > version.new
 	diff -q -N version.new version.inc >/dev/null || mv version.new version.inc
 	echo Version `cat version.inc`
