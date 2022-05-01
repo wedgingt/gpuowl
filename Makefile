@@ -45,9 +45,9 @@ OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 DEPDIR := .d
 DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
-POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
+#POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
-all: .d version.inc gpuowl
+all: .d gpuowl
 	echo $@ > $@
 
 gpuowl: $(OWL_OBJS)
@@ -66,12 +66,14 @@ clean:
 
 %.o: %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp version.inc
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
-	$(POSTCOMPILE)
+	#$(POSTCOMPILE)
 
 $(DEPDIR)/%.d: %.cpp
 
 .d: FORCE
 	mkdir -p $(DEPDIR)
+
+version.h: version.inc ;
 
 version.inc: FORCE
 	echo \"`git describe --tags --long --dirty --always`\" > version.new
@@ -89,4 +91,4 @@ install: gpuowl
 
 FORCE:
 
-include $(wildcard $(patsubst %,$(DEPDIR)/%.d,$(basename $(SRCS))))
+include $(wildcard $(patsubst %,$(DEPDIR)/%.Td,$(basename $(SRCS))))
