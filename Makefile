@@ -43,7 +43,6 @@ OBJS = $(SRCS:%.cpp=%.$(O))
 OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 
 DEPDIR := .d
-$(shell mkdir -p $(DEPDIR) >/dev/null)
 DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
@@ -61,14 +60,17 @@ D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 clean:
 	rm -f $(OBJS) gpuowl gpuowl-win.exe
 
-%.$(O) : %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp version.inc
+%.$(O) : version.inc %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	$(POSTCOMPILE)
 
 $(DEPDIR)/%.d: ;
 .PRECIOUS: $(DEPDIR)/%.d
 
-version.inc: FORCE
+.d: FORCE
+	mkdir -p $(DEPDIR)
+
+version.inc: .d
 	echo \"`git describe --tags --long --dirty --always`\" > version.new
 	diff -q -N version.new version.inc >/dev/null || mv version.new version.inc
 	echo Version `cat version.inc`
