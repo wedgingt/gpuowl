@@ -47,7 +47,7 @@ DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 #POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
-all: .d gpuowl
+all: .d version.inc gpuowl
 	echo $@ > $@
 
 gpuowl: $(OWL_OBJS)
@@ -64,7 +64,7 @@ clean:
 	rm -f $(OBJS) gpuowl gpuowl-win.exe
 	rm -rf $(DEPDIR)
 
-%.o: %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp version.inc
+%.o: %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	#$(POSTCOMPILE)
 
