@@ -19,7 +19,7 @@
 
 struct PRPResult;
 struct PRPState;
-struct Task;
+class Task;
 
 class Args;
 class Saver;
