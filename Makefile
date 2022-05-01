@@ -1,4 +1,4 @@
-CXXFLAGS = -Wall -g -O3 -std=gnu++17
+CXXFLAGS = -Wall -g -O3 -std=gnu++17 -I.
 
 ifeq (yes,$(shell test -d /opt/rocm-4.0.0/opencl/lib && echo 'yes'))
 CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
