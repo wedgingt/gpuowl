@@ -60,11 +60,11 @@ D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 clean:
 	rm -f $(OBJS) gpuowl gpuowl-win.exe
 
-%.$(O) : version.inc %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp
+%.$(O) : %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	$(POSTCOMPILE)
 
-$(DEPDIR)/%.d: ;
+$(DEPDIR)/%.d: version.inc ;
 .PRECIOUS: $(DEPDIR)/%.d
 
 .d: FORCE
