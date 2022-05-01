@@ -1,7 +1,11 @@
 CXXFLAGS = -Wall -g -O3 -std=gnu++17
 
 ifeq (yes,$(shell test -d /opt/rocm-4.0.0/opencl/lib && echo 'yes'))
-CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
+CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
+CUDA_INCL =
+else
+ifeq (yes,$(shell test -d /opt/rocm-3.3.0/opencl/lib/x86_64 && echo 'yes'))
+CUDA_LIBS = -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib/x86_64 -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
 CUDA_INCL =
 else
 ifeq (yes,$(shell test -d /opt/rocm/opencl/lib/x86_64 && echo 'yes'))
@@ -16,10 +20,9 @@ ifeq (yes,$(shell test -d /usr/local/cuda-10 && echo 'yes'))
 CUDA_LIBS = -fPIC -L/usr/local/cuda-10/lib64 -lcudart -lOpenCL
 CUDA_INCL = -I/usr/local/cuda-10/include
 else
-error: FORCE
-	@echo Add location of CUDA libraries and include files to Makefile
-	env | cat -v
-	exit 1
+CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu
+CUDA_INCL = -IdefaultCUDA_LIBS
+endif
 endif
 endif
 endif
