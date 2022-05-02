@@ -1,5 +1,15 @@
 CXXFLAGS = -Wall -g -O3 -std=gnu++17 -I.
 
+ifeq (,$(shell which uname && uname -o | fgrep -i linux))
+EXE=gpuowl
+else
+ifeq (,$(shell which uname && uname -o | fgrep -i cygwin))
+EXE=gpuowl-cygwin.exe
+else
+EXE=gpuowl-win.exe
+endif
+endif
+
 ifeq (yes,$(shell test -d /opt/rocm-4.0.0/opencl/lib && echo 'yes'))
 CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
 CUDA_INCL =
@@ -47,11 +57,14 @@ DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 #POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
-all: .d version.inc gpuowl
+all: .d version.inc $(EXE)
 	echo $@ > $@
 
 gpuowl: $(OWL_OBJS)
 	$(LINK) $^ -o $@ $(LDFLAGS)
+
+gpuowl-cygwin.exe: $(OWL_OBJS)
+	$(LINK) -static $^ -o $@ $(LDFLAGS)
 
 gpuowl-win.exe: $(OWL_OBJS)
 	$(LINK) -static $^ -o $@ $(LDFLAGS)
