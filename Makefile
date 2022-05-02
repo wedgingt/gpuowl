@@ -1,9 +1,9 @@
 CXXFLAGS = -Wall -g -O3 -std=gnu++17 -I.
 
-ifeq (,$(shell which uname && uname -o | fgrep -i linux))
+ifneq (,$(shell which uname && uname -o | fgrep -i linux))
 EXE=gpuowl
 else
-ifeq (,$(shell which uname && uname -o | fgrep -i cygwin))
+ifneq (,$(shell which uname && uname -o | fgrep -i cygwin))
 EXE=gpuowl-cygwin.exe
 else
 EXE=gpuowl-win.exe
