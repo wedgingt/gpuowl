@@ -10,35 +10,22 @@ EXE=gpuowl-win.exe
 endif
 endif
 
-ifeq (yes,$(shell test -d /opt/rocm-4.0.0/opencl/lib && echo 'yes'))
-CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
-CUDA_INCL =
-else
-ifeq (yes,$(shell test -d /opt/rocm-3.3.0/opencl/lib/x86_64 && echo 'yes'))
-CUDA_LIBS = -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib/x86_64 -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
-CUDA_INCL =
-else
-ifeq (yes,$(shell test -d /opt/rocm/opencl/lib/x86_64 && echo 'yes'))
-CUDA_LIBS = -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm-3.1.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
-CUDA_INCL =
-else
 ifeq (yes,$(shell test -d /usr/local/cuda-11 && echo 'yes'))
-CUDA_LIBS = -fPIC -L/usr/local/cuda-11/lib64 -lcudart -lOpenCL
+CUDA_LIBS = -fPIC -L/usr/local/cuda-11/lib64 -lcudart
 CUDA_INCL = -I/usr/local/cuda-11/include
-else
+endif
 ifeq (yes,$(shell test -d /usr/local/cuda-10 && echo 'yes'))
-CUDA_LIBS = -fPIC -L/usr/local/cuda-10/lib64 -lcudart -lOpenCL
+CUDA_LIBS = -fPIC -L/usr/local/cuda-10/lib64 -lcudart
 CUDA_INCL = -I/usr/local/cuda-10/include
-else
-CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu
-CUDA_INCL = -IdefaultCUDA_LIBS
-endif
-endif
-endif
-endif
 endif
 
-LIBPATH = $(CUDA_LIBS) -L.
+ifeq (,$(CUDA_LIBS))
+# default
+CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm-3.1.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu
+CUDA_INCL = -IdefaultCUDA_LIBS
+endif
+
+LIBPATH = $(CUDA_LIBS) -L. -lOpenCL
 
 LDFLAGS = -lstdc++fs $(LIBPATH) -lgmp -pthread -lquadmath $(LIBPATH)
 
