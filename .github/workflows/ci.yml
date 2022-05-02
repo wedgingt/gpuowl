@@ -50,5 +50,5 @@ jobs:
     - uses: actions/checkout@v1
     - name: Script
       run: |
-        make gpuowl-win.exe
+        make
         ./gpuowl-win.exe -h
