@@ -2,11 +2,14 @@ CXXFLAGS = -Wall -g -O3 -std=gnu++17 -I.
 
 ifneq (,$(shell which uname && uname -o | fgrep -i linux))
 EXE=gpuowl
+O=o
 else
 ifneq (,$(shell which uname && uname -o | fgrep -i cygwin))
 EXE=gpuowl-cygwin.exe
+O=obj
 else
 EXE=gpuowl-win.exe
+O=obj
 endif
 endif
 
@@ -33,9 +36,6 @@ LINK = $(CXX) $(CXXFLAGS)
 
 SRCS=$(wildcard *.cpp)
 
-# Change this to obj on MSWindows
-O=o
-
 OBJS = $(SRCS:%.cpp=%.$(O))
 OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 
@@ -44,31 +44,36 @@ DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 #POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
-all: .d version.inc $(EXE)
+all: .d version.inc gpuowl-wrap.cpp $(EXE)
 	echo $@ > $@
 
-gpuowl: $(OWL_OBJS)
-	$(LINK) $^ -o $@ $(LDFLAGS)
+gpuowl: $(OWL_OBJS) gpuowl-wrap.$(O)
+	$(LINK) $^ gpuowl-wrap.$(O) -o $@ $(LDFLAGS)
 
-gpuowl-cygwin.exe: $(OWL_OBJS)
-	$(LINK) -static $^ -o $@ $(LDFLAGS)
+gpuowl-cygwin.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
+	$(LINK) -static $^ gpuowl-wrap.$(O) -o $@ $(LDFLAGS)
 
-gpuowl-win.exe: $(OWL_OBJS)
-	$(LINK) -static $^ -o $@ $(LDFLAGS)
+gpuowl-win.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
+	$(LINK) -static $^ gpuowl-wrap.$(O) -o $@ $(LDFLAGS)
 	strip $@
 
 D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 	$(LINK) $^ -o $@ $(LDFLAGS)
 
 clean:
-	rm -f $(OBJS) gpuowl gpuowl-win.exe
+	rm -f $(OBJS) gpuowl gpuowl-win.exe gpuowl-wrap.cpp gpuowl-wrap.$(O)
 	rm -rf $(DEPDIR)
 
-%.o: %.cpp $(DEPDIR)/%.d gpuowl-wrap.cpp
+%.o: %.cpp $(DEPDIR)/%.d
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	#$(POSTCOMPILE)
 
-$(DEPDIR)/%.d: %.cpp
+%.obj: %.cpp $(DEPDIR)/%.d
+	$(COMPILE.cc) $(OUTPUT_OPTION) $<
+	#$(POSTCOMPILE)
+
+$(DEPDIR)/%.d: %.cpp ;
+$(DEPDIR)/gpuowl-wrap.d: gpuowl-wrap.cpp ;
 
 .d: FORCE
 	mkdir -p $(DEPDIR)
