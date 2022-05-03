@@ -48,13 +48,13 @@ all: .d version.inc gpuowl-wrap.cpp $(EXE)
 	echo $@ > $@
 
 gpuowl: $(OWL_OBJS) gpuowl-wrap.$(O)
-	$(LINK) $^ gpuowl-wrap.$(O) -o $@ $(LDFLAGS)
+	$(LINK) $^ -o $@ $(LDFLAGS)
 
 gpuowl-cygwin.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
-	$(LINK) -static $^ gpuowl-wrap.$(O) -o $@ $(LDFLAGS)
+	$(LINK) -static $^ -o $@ $(LDFLAGS)
 
 gpuowl-win.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
-	$(LINK) -static $^ gpuowl-wrap.$(O) -o $@ $(LDFLAGS)
+	$(LINK) -static $^ -o $@ $(LDFLAGS)
 	strip $@
 
 D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
