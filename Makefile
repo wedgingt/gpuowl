@@ -66,7 +66,9 @@ D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 	$(LINK) $^ -o $@ $(LDFLAGS)
 
 clean:
-	rm -f $(OBJS) gpuowl gpuowl-win.exe gpuowl-wrap.cpp gpuowl-wrap.$(O)
+	rm -f *.$(O) gpuowl gpuowl-win.exe gpuowl-wrap.cpp
+	rm -f all gpuowl-expanded.cl gpuowl-cygwin.exe D
+	rm -f version.h version.inc install FORCE clean
 	rm -rf $(DEPDIR)
 
 %.o: %.cpp $(DEPDIR)/%.d
@@ -80,7 +82,7 @@ clean:
 $(DEPDIR)/%.d: %.cpp ;
 $(DEPDIR)/gpuowl-wrap.d: gpuowl-wrap.cpp ;
 
-.d: FORCE
+$(DEPDIR): FORCE
 	mkdir -p $(DEPDIR)
 
 version.h: version.inc ;
