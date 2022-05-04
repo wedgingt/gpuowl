@@ -71,11 +71,11 @@ clean:
 
 %.o: %.cpp $(DEPDIR)/%.d
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
-	#$(POSTCOMPILE)
+#	$(POSTCOMPILE)
 
 %.obj: %.cpp $(DEPDIR)/%.d
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
-	#$(POSTCOMPILE)
+#	$(POSTCOMPILE)
 
 $(DEPDIR)/%.d: %.cpp ;
 $(DEPDIR)/gpuowl-wrap.d: gpuowl-wrap.cpp ;
