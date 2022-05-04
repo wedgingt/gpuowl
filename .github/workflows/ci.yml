@@ -52,12 +52,6 @@ jobs:
     - uses: actions/checkout@v1
     - name: Script
       run: |
-        echo '+ env'
-        env
-        echo '+ which python3'
-        which python3
-        echo '+ which python'
-        which python
         echo '+ make OS=MSWindows'
         make OS=MSWindows
         echo '+ ./gpuowl-win.exe -h'
