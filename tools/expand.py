@@ -1,6 +1,4 @@
-#!/usr/bin/python -E
-
-from __future__ import print_function
+#!/usr/bin/python3
 
 import sys
 
@@ -9,8 +7,8 @@ current = None
 body = None
 macros = {}
 
-def err(text, lineNum):
-    print('#', lineNum, ' ', text, sep='', file=sys.stderr)
+def err(text):
+    print(f'#{lineNo}', text, file=sys.stderr)
     exit(1)
 
 for line in sys.stdin:
@@ -20,13 +18,13 @@ for line in sys.stdin:
     if line.startswith('//{{ '):
         name = line[5:].strip()
         if current:
-            err(' '.join('starting template', name, 'while', current, 'is active'))
+            err(f'starting template {name} while {current} is active')
         else:
             current = name
             body = ''
     elif line.startswith('//}}'):
         if not current:
-            err('template end without begin')
+            err(f'template end without begin')
         else:
             macros[current] = body
             current = None
@@ -34,7 +32,7 @@ for line in sys.stdin:
         if line.startswith('//== '):
             name, _, tail = line[5:].partition(' ')
             if name not in macros:
-                err(' '.join('template', name, 'not defined'))
+                err(f'template {name} not defined')
             body = macros[name]
             args = map(str.strip, tail.split(','))
             for arg in args:
