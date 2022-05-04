@@ -93,7 +93,7 @@ version.inc: FORCE
 	echo Version `cat version.inc`
 
 gpuowl-expanded.cl: gpuowl.cl tools/expand.py
-	python ./tools/expand.py < gpuowl.cl > gpuowl-expanded.cl
+	python3 ./tools/expand.py < gpuowl.cl > gpuowl-expanded.cl
 
 gpuowl-wrap.cpp: head.txt gpuowl-expanded.cl tail.txt
 	cat $^ > gpuowl-wrap.cpp
