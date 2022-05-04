@@ -90,14 +90,14 @@ version.inc: FORCE
 	diff -q -N version.new version.inc >/dev/null || mv version.new version.inc
 	echo Version `cat version.inc`
 
-gpuowl-expanded.cl: gpuowl.cl
+gpuowl-expanded.cl: gpuowl.cl tools/expand.py
 	./tools/expand.py < gpuowl.cl > gpuowl-expanded.cl
 
-gpuowl-wrap.cpp: gpuowl-expanded.cl head.txt tail.txt
-	cat head.txt gpuowl-expanded.cl tail.txt > gpuowl-wrap.cpp
+gpuowl-wrap.cpp: head.txt gpuowl-expanded.cl tail.txt
+	cat $^ > gpuowl-wrap.cpp
 
-install: gpuowl
-	install -m 555 gpuowl ../
+install: $(EXE)
+	install -m 555 $(EXE) ../
 
 FORCE:
 
