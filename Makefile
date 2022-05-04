@@ -68,7 +68,7 @@ D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 clean:
 	rm -f *.$(O) gpuowl gpuowl-win.exe gpuowl-wrap.cpp
 	rm -f all gpuowl-expanded.cl gpuowl-cygwin.exe D
-	rm -f version.h version.inc install FORCE clean
+	rm -f version.inc install FORCE clean
 	rm -rf $(DEPDIR)
 
 %.o: %.cpp $(DEPDIR)/%.d
