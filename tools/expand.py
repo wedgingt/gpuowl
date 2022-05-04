@@ -1,5 +1,7 @@
 #!/usr/bin/python
 
+from __future__ import print_function
+
 import sys
 
 lineNo = 0
@@ -32,8 +34,7 @@ for line in sys.stdin:
         if line.startswith('//== '):
             name, _, tail = line[5:].partition(' ')
             if name not in macros:
-                err(' '.join('template', name, 'not defined')
-
+                err(' '.join('template', name, 'not defined'))
             body = macros[name]
             args = map(str.strip, tail.split(','))
             for arg in args:
