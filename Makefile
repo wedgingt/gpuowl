@@ -19,17 +19,17 @@ endif
 endif
 
 ifeq (yes,$(shell test -d /usr/local/cuda-11 && echo 'yes'))
-CUDA_LIBS = -fPIC -L/usr/local/cuda-11/lib64 -lcudart
+CUDA_LIBS = -fPIC -L/usr/local/cuda-11/lib64 -lcudart -lOpenCL
 CUDA_INCL = -I/usr/local/cuda-11/include
 endif
 ifeq (yes,$(shell test -d /usr/local/cuda-10 && echo 'yes'))
-CUDA_LIBS = -fPIC -L/usr/local/cuda-10/lib64 -lcudart
+CUDA_LIBS = -fPIC -L/usr/local/cuda-10/lib64 -lcudart -lOpenCL
 CUDA_INCL = -I/usr/local/cuda-10/include
 endif
 
 ifeq (,$(CUDA_LIBS))
 # default
-CUDA_LIBS = -L/opt/rocm-5.1.1/opencl/lib -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu
+CUDA_LIBS = -L/opt/rocm-5.1.1/opencl/lib -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu -lOpenCL
 endif
 ifeq (,$(CUDA_INCL))
 CUDA_INCL = -IdefaultCUDA_LIBS
