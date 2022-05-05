@@ -33,13 +33,22 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-20.04 ]
+        cxx: [g++, clang++]
         language: [ 'cpp', 'python' ]
         # CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby' ]
         # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
+    env:
+      CXX: ${{ matrix.cxx }}
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
+
+    - name: Install
+      run: |
+        sudo apt-get -yqq update
+        sudo apt-get -yqq install cppcheck ocl-icd-* opencl-headers
+        $CXX --version
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
