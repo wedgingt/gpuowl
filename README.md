@@ -52,14 +52,14 @@ The probable prime test can prove that a candidate is composite (without providi
 is prime (only stating that it _probably_ is prime) -- although in practice the difference between probable prime and proved
 prime is extremely small for large Mersenne candidates.
 
-The PRP test is very similar computationally to LL: PRP iterates f(x) = x^2 modulo M(p) starting from 3, for p iterations. The cost
+The PRP test is very similar computationally to LL: PRP iterates f(x) = x^2 modulo M(p) starting from 3. If after p iterations the result is 9 modulo M(p), then M(p) is probably prime, otherwise M(p) is certainly not prime. The cost
 of PRP is exactly the same as LL.
 
 In practice, PRP is preferred over LL because PRP does have a very strong and useful error-checking technique, which protects effectively against computation errors (which are sometimes common on GPUs).
 
 ## GpuOwl: OpenCL GPU Mersenne primality testing
 GpuOwl implements the PRP and P-1 tests. It also implemented, at various points in the past, LL and TF but these are not active now
-in GpuOwl. For double check (DC) LL tests, see [version 6.11](https://github.com/preda/gpuowl/releases/tag/v6.11) and for first time LL tests, see the [LL branch](https://github.com/preda/gpuowl/tree/LL) (version 0.6).
+in GpuOwl. For double check (DC) LL tests, see the [v6 branch](https://github.com/preda/gpuowl/tree/v6) (version 6.11-382) and for first time LL tests, see the [LL branch](https://github.com/preda/gpuowl/tree/LL) (version 0.6).
 
 Let us consider the PRP test, to get an idea of what GpuOwl does under the hood.
 
@@ -94,17 +94,39 @@ The first form indicates just the exponent to test, while the form starting with
 exponent and optionally the assignment ID (AID) from PrimeNet. The `PRPDC=` prefix can be used instead for PRP DC assignments.
 
 ## Usage
-* Get "PRP smallest available first time tests" assignments from GIMPS Manual Testing ( http://mersenne.org/ ).
+* Get "PRP smallest available first time tests" assignments from GIMPS Manual Testing ( https://www.mersenne.org/manual_assignment/ ).
 * Copy the assignment lines from GIMPS to a file named '`worktodo.txt`'
 * Run `gpuowl`. It prints progress report on stdout and in `gpuowl.log`, and writes result lines to `results.txt`
-* Submit the result lines from `results.txt` to http://mersenne.org/ manual testing.
+* Submit the result lines from `results.txt` to https://www.mersenne.org/manual_result/ manual testing.
+
 
 ## Build
-To build simply invoke "`make`" (or look inside the Makefile for a manual build).
 
-* the GNU Multiple Precision (GMP) library `libgmp-dev`
+Prerequisites (please install these):
+* the GNU Multiple Precision (GMP) 6.1 library `libgmp-dev`
 * a C++20 compiler (e.g. GCC, Clang)
 * an OpenCL implementation (which provides the **libOpenCL** library). Recommended: an AMD GPU with ROCm 1.7.
+
+### Meson build
+Example build steps on linux:
+```
+cd gpuowl
+mkdir build
+cd build
+meson ..
+ninja
+```
+
+What the previous commands do:
+- go to gpuowl source directory
+- create a subdirectory named "build"
+- go to the build directory
+- invoke meson, passing as argument the gpuowl source directory (.. in this situation)
+- run ninja to build
+
+### Make build
+To build simply invoke "`make`" (or look inside the Makefile for a manual build).
+
 
 ## See \"`gpuowl -h`\" for the command line options.
 
@@ -127,7 +149,7 @@ Simply start GpuOwl with any valid exponent, and the built-in error checking kic
 -carry long|short  : force carry type. Short carry may be faster, but requires high bits/word.
 -B1                : P-1 B1 bound
 -B2                : P-1 B2 bound
--rB2               : ratio of B2 to B1. Default 30, used only if B2 is not explicitly set
+-rB2               : ratio of B2 to B1. Default 20, used only if B2 is not explicitly set
 -prp <exponent>    : run a single PRP test and exit, ignoring worktodo.txt
 -verify <file>     : verify PRP-proof contained in <file>
 -proof <power>     : By default a proof of power 8 is generated, using 3GB of temporary disk space for a 100M exponent.

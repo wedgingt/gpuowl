@@ -29,18 +29,19 @@ endif
 
 ifeq (,$(CUDA_LIBS))
 # default
-CUDA_LIBS = -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm-3.1.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu
+CUDA_LIBS = -L/opt/rocm-5.1.1/opencl/lib -L/opt/rocm-4.0.0/opencl/lib -L/opt/rocm-3.3.0/opencl/lib/x86_64 -L/opt/rocm/opencl/lib -L/opt/rocm/opencl/lib/x86_64 -L/opt/amdgpu-pro/lib/x86_64-linux-gnu
+endif
+ifeq (,$(CUDA_INCL))
 CUDA_INCL = -IdefaultCUDA_LIBS
 endif
 
-LIBPATH = $(CUDA_LIBS) -L. -lOpenCL
+LIBPATH = $(CUDA_LIBS) -L.
 
-LDFLAGS = -lstdc++fs $(LIBPATH) -lgmp -pthread -lquadmath $(LIBPATH)
+LDFLAGS = -lstdc++fs $(LIBPATH) -lgmp -pthread
 
 LINK = $(CXX) $(CXXFLAGS)
 
 SRCS=$(wildcard *.cpp)
-
 OBJS = $(SRCS:%.cpp=%.$(O))
 OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 
@@ -95,8 +96,8 @@ version.inc: FORCE
 gpuowl-expanded.cl: gpuowl.cl tools/expand.py
 	python3 ./tools/expand.py < gpuowl.cl > gpuowl-expanded.cl
 
-gpuowl-wrap.cpp: head.txt gpuowl-expanded.cl tail.txt
-	cat $^ > gpuowl-wrap.cpp
+gpuowl-wrap.cpp: gpuowl.cl
+	python3 tools/expand.py < gpuowl.cl > gpuowl-wrap.cpp
 
 install: $(EXE)
 	install -m 555 $(EXE) ../
