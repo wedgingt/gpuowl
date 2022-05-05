@@ -1383,7 +1383,7 @@ void Gpu::doP2(Saver* saver, u32 b1, u32 b2, future<string>& gcdFuture, Signal &
   
 
   // Warn: hack: the use of buf1 below as both output and temporary relies on the implementation of exponentiateLow().
-  exponentiateLow(buf1, buf3, plan.D * plan.D, buf1, buf2); // base^(D^2)  
+  exponentiateLow(buf1, buf3, ((u64)plan.D * (u64)plan.D), buf1, buf2); // base^(D^2)  
   SquaringSet big{*this, N, buf1, buf2, buf3, {u64(startBlock)*startBlock, 2 * startBlock + 1, 2}, "big"};
   
   queue->finish();
