@@ -48,7 +48,7 @@ OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 DEPDIR := .d
 DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
-#POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
+POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
 all: .d version.inc gpuowl-wrap.cpp $(EXE)
 	echo $@ > $@
@@ -74,23 +74,24 @@ clean:
 
 %.o: %.cpp $(DEPDIR)/%.d
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
-#	$(POSTCOMPILE)
+	$(POSTCOMPILE)
 
 %.obj: %.cpp $(DEPDIR)/%.d
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
-#	$(POSTCOMPILE)
+	$(POSTCOMPILE)
 
 $(DEPDIR)/%.d: %.cpp ;
 $(DEPDIR)/gpuowl-wrap.d: gpuowl-wrap.cpp ;
 
-$(DEPDIR): FORCE
+$(DEPDIR):
 	mkdir -p $(DEPDIR)
 
-version.h: version.inc ;
+version.h: version.inc
+	touch $@
 
-version.inc: FORCE
+version.inc: $(DEPDIR)
 	echo \"`git describe --tags --long --dirty --always`\" > version.new
-	diff -q -N version.new version.inc >/dev/null || mv version.new version.inc
+	diff -q -N version.new version.inc >/dev/null || cp version.new version.inc
 	echo Version `cat version.inc`
 
 gpuowl-expanded.cl: gpuowl.cl tools/expand.py
