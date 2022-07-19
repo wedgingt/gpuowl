@@ -98,7 +98,7 @@ gpuowl-expanded.cl: gpuowl.cl tools/expand.py
 	python3 ./tools/expand.py < gpuowl.cl > gpuowl-expanded.cl
 
 gpuowl-wrap.cpp: gpuowl.cl
-	python3 tools/expand.py < gpuowl.cl > gpuowl-wrap.cpp
+	python3 tools/expand.py gpuowl.cl gpuowl-wrap.cpp
 
 install: $(EXE)
 	install -m 555 $(EXE) ../

@@ -11,13 +11,12 @@ IN_WG,IN_SIZEX,IN_SPACING <AMD default is 256,32,1>  <nVidia default is 256,4,1 
 UNROLL_WIDTH <nVidia default>
 NO_UNROLL_WIDTH <AMD default>
 
-OLD_FFT8 <default>
-NEWEST_FFT8
-NEW_FFT8
-
 OLD_FFT5
 NEW_FFT5 <default>
 NEWEST_FFT5
+
+NEW_FFT9 <default>
+OLD_FFT9
 
 CARRY32 <AMD default for PRP when appropriate>
 CARRY64 <nVidia default>, <AMD default for PM1 when appropriate>
@@ -71,8 +70,9 @@ G_H        "group height"
 #endif
 
 // 64-bit atomics used in kernel sum64
+// If 64-bit atomics aren't available, sum64() can be implemented with 32-bit
 #pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
-//#pragma OPENCL EXTENSION cl_khr_int64_extended_atomics : enable
+// #pragma OPENCL EXTENSION cl_khr_int64_extended_atomics : enable
 
 #if DEBUG
 #define assert(condition) if (!(condition)) { printf("assert(%s) failed at line %d\n", STR(condition), __LINE__ - 1); }
@@ -93,6 +93,9 @@ G_H        "group height"
 // disable everything that depends on ASM
 #define NO_OMOD 1
 #endif
+
+// tuning: disable
+#define NO_OMOD 1
 
 #if CARRY32 && CARRY64
 #error Conflict: both CARRY32 and CARRY64 requested
@@ -205,190 +208,27 @@ typedef i32 Word;
 typedef int2 Word2;
 typedef i64 CarryABM;
 
-#if SP
-
-typedef float3 T;
-typedef float6 TT;
-#define RE(a) (a.s012)
-#define IM(a) (a.s345)
-
-#else
-
 typedef double T;
 typedef double2 TT;
 #define RE(a) (a.x)
 #define IM(a) (a.y)
 
+void bar() {
+#if 0 && HAS_ASM
+   __asm("s_barrier");
+#else
+   barrier(0);
 #endif
-
-void bar() { barrier(0); }
+}
 
 TT U2(T a, T b) { return (TT) (a, b); }
 
-
-#if SP
-
-// See Fast-Two-Sum and Two-Sum in
-// "Extended-Precision Floating-Point Numbers for GPU Computation" by Andrew Thall
-
-// 3 ADD. Requires |a| >= |b|
-OVERLOAD float2 quickTwoSum(float a, float b) {
-  float s = a + b;
-  return (float2) (s, b - (s - a));
-}
-
-OVERLOAD float quickTwoSum(float a, float b, float* e) {
-  float s = a + b;
-  *e = b - (s - a);
-  return s;
-}
-
-OVERLOAD float quickTwoSum(float a, float* b) {
-  float s = a + *b;
-  *b -= (s - a);
-  return s;
-}
-
-// 6 ADD
-OVERLOAD float2 twoSum(float a, float b) {
-#if 0
-  if (fabs(b) > fabs(a)) { float t = a; a = b; b = t; }
-  return quickTwoSum(a, b);
-#elif 0
-  return (fabs(a) >= fabs(b)) ? quickTwoSum(a, b) : quickTwoSum(b, a);
-#else
-  // No branch but twice the ADDs.
-  float s = a + b;
-  float b1 = s - a;
-  float a1 = s - b1;
-  float e = (b - b1) + (a - a1);
-  return (float2) (s, e);
-#endif
-  
-  // Eqivalent (?)
-  // float2 s1 = fastSum(a, b);
-  // float2 s2 = fastSum(b, a);
-  // return (float2) (s1.x, s1.y + s2.y);
-}
-
-OVERLOAD float twoSum(float a, float b, float* e) {
-  float s = a + b;
-  float b1 = s - a;
-  float a1 = s - b1;
-  *e = (b - b1) + (a - a1);
-  return s;
-}
-
-// 16 ADD.
-float3 renormalize(float a, float b, float c, float d) {
-  c = quickTwoSum(c, &d);
-  b = quickTwoSum(b, &c);
-  a = quickTwoSum(a, &b);
-
-  c = quickTwoSum(c, &d);
-  b = quickTwoSum(b, &c);
-
-  return (float3) (a, b, c + d);  
-}
-
-// 54 ADD.
-OVERLOAD float3 sum(float3 u, float3 v) {
-  float a, b, c, d, e, f;
-  a = twoSum(u.x, v.x, &e);
-  
-  b = twoSum(u.y, v.y, &f);
-  b = twoSum(b, e, &e);
-
-  c = twoSum(u.z, v.z, &d);
-  c = twoSum(c, f, &f);
-  c = twoSum(c, e, &e);
-
-  return renormalize(a, b, c, d + (f + e));
-}
-
-/*
-// 21 ADD. See https://web.mit.edu/tabbott/Public/quaddouble-debian/qd-2.3.4-old/docs/qd.pdf , Figure 10.
-OVERLOAD float3 sum(float3 a, float3 b) {
-  float2 c0 = twoSum(a.x, b.x);
-  float2 t1 = twoSum(a.y, b.y);
-  float2 c1 = twoSum(t1.x, c0.y);
-  return (float3) (c0.x, c1.x, a.z + b.z + t1.y + c1.y);
-}
-*/
-
-// 2 MUL
-OVERLOAD float2 twoMul(float a, float b) {
-  float c = a * b;
-  float d = fma(a, b, -c);
-  return (float2) (c, d);
-}
-
-// 15 ADD + 9 MUL
-OVERLOAD float3 mul(float3 a, float3 b) {
-  float2 c = twoMul(a.x, b.x);
-  
-  float2 d0 = twoMul(a.x, b.y);
-  float2 d1 = twoMul(a.y, b.x);
-
-  float2 e0 = twoSum(d0.x, d1.x);
-  float2 e1 = twoSum(e0.x, c.y);
-  
-  float f = fma(a.x, b.z, d0.y + d1.y);
-  f = fma(a.y, b.y, f + e0.y);
-  f = fma(a.z, b.x, f + e1.y);
-
-#if 0
-  // e0 = sum(c.y, d0.x);
-  // e1 = sum(e0.x, d1.x);  
-  f = fma(a.z, b.x, fma(a.y, b.y, fma(a.x, b.z, d0.y))) + d1.y + e0.y + e1.y;
-#endif
-  
-  return (float3) (c.x, e1.x, f);
-}
-
-// 15 ADD + 8 MUL
-OVERLOAD float3 mul(float3 a, float2 b) {
-  float2 c = twoMul(a.x, b.x);
-  
-  float2 d0 = twoMul(a.x, b.y);
-  float2 d1 = twoMul(a.y, b.x);
-
-  float2 e0 = twoSum(d0.x, d1.x);
-  float2 e1 = twoSum(e0.x, c.y);
-  
-  f = fma(a.y, b.y, d0.y + d1.y + e0.y);
-  f = fma(a.z, b.x, f + e1.y);
-
-  return (float3) (c.x, e1.x, f);
-}
-
-// 9 ADD + 6 MUL
-OVERLOAD float3 sq(float3 a) {
-  float2 c = twoMul(a.x, a.x);
-  float2 d = twoMul(a.x, a.y);
-  float2 e = twoSum(2 * d.x, c.y);
-  float f = fma(a.y, a.y, 2 * fma(a.x, a.z, d.y)) + e.y;
-  return (float3) (c.x, e.x, f);
-}
-
-// TODO: merge the ADD into the MUL
-OVERLOAD float3 mad1(float3 a, float3 b, float3 c) { return sum(mul(a, b), c); }
-
-#else
-
-// ---- DP ----
-
 OVERLOAD double sum(double a, double b) { return a + b; }
-
-// double sub(double a, double b) { return a - b; }
 
 OVERLOAD double mad1(double x, double y, double z) { return x * y + z; }
   // fma(x, y, z); }
 
 OVERLOAD double mul(double x, double y) { return x * y; }
-
-#endif
-
 
 T add1_m2(T x, T y) {
 #if !NO_OMOD && !SP
@@ -423,13 +263,8 @@ T mul1_m2(T x, T y) {
 
 
 OVERLOAD T fancyMul(T x, const T y) {
-#if SP
-  // for SP we skip the "+1" trick.
-  return mul(x, y);
-#else
   // x * (y + 1);
   return fma(x, y, x);
-#endif
 }
 
 OVERLOAD TT fancyMul(TT x, const TT y) {
@@ -456,24 +291,11 @@ T mad1_m4(T a, T b, T c) {
 #endif
 }
 
-#if SP
-
-// complex square
-OVERLOAD TT sq(TT a) { return U2(sum(sq(RE(a)), -sq(IM(a))), 2 * mul(RE(a), IM(a))); }
-
-// complex mul
-OVERLOAD TT mul(TT a, TT b) { return U2(mad1(RE(a), RE(b), -mul(IM(a), IM(b))), mad1(RE(a), IM(b), mul(IM(a), RE(b)))); }
-
-#else
-
 // complex square
 OVERLOAD TT sq(TT a) { return U2(mad1(RE(a), RE(a), - IM(a) * IM(a)), mul1_m2(RE(a), IM(a))); }
 
 // complex mul
 OVERLOAD TT mul(TT a, TT b) { return U2(mad1(RE(a), RE(b), - IM(a) * IM(b)), mad1(RE(a), IM(b), IM(a) * RE(b))); }
-
-#endif
-
 
 bool test(u32 bits, u32 pos) { return (bits >> pos) & 1; }
 
@@ -501,49 +323,13 @@ TT mad_m2(TT a, TT b, TT c) { return U2(mad1_m2(RE(a), RE(b), mad1(IM(a), -IM(b)
 TT mul_t4(TT a)  { return U2(IM(a), -RE(a)); } // mul(a, U2( 0, -1)); }
 
 
-#if SP
-
-#define SP_SQRT1_2 (float3) (0.707106769,1.21016175e-08,-3.81403372e-16)
-
-TT mul_t8(TT a)  {
-  return U2(mul(sum(IM(a),  RE(a)), SP_SQRT1_2),
-            mul(sum(IM(a), -RE(a)), SP_SQRT1_2));
-}
-
-TT mul_3t8(TT a) {
-  return U2(mul(sum(IM(a), -RE(a)),  SP_SQRT1_2),
-            mul(sum(IM(a),  RE(a)), -SP_SQRT1_2));
-}
-
-#else
-
 TT mul_t8(TT a)  { return U2(IM(a) + RE(a), IM(a) - RE(a)) *   M_SQRT1_2; }  // mul(a, U2( 1, -1)) * (T)(M_SQRT1_2); }
 TT mul_3t8(TT a) { return U2(RE(a) - IM(a), RE(a) + IM(a)) * - M_SQRT1_2; }  // mul(a, U2(-1, -1)) * (T)(M_SQRT1_2); }
-
-#endif
 
 TT swap(TT a)      { return U2(IM(a), RE(a)); }
 TT conjugate(TT a) { return U2(RE(a), -IM(a)); }
 
-#if SP
-
-#error TODO
-
-float2 fromWord(Word u) {
-  float a = u;
-  return (float2) (a, u - a); 
-}
-
-TT weight(Word2 a, TT w) {
-  return U2(mul(RE(w), fromWord(RE(a))),
-            mul(IM(w), fromWord(IM(a))));
-}
-
-#else
-
 TT weight(Word2 a, TT w) { return w * U2(RE(a), IM(a)); }
-
-#endif
 
 u32 bfi(u32 u, u32 mask, u32 bits) {
 #if HAS_ASM
@@ -555,14 +341,6 @@ u32 bfi(u32 u, u32 mask, u32 bits) {
   return (u & mask) | bits;
 #endif
 }
-
-#if SP
-
-float3 optionalDouble(float3 iw) { return (iw.x < 1.0f) ? 2 * iw : iw; }
-
-float3 optionalHalve(float3 w) { return (w.x >= 4) ? 0.5f * w : w; }
-
-#else
 
 T optionalDouble(T iw) {
   // In a straightforward implementation, inverse weights are between 0.5 and 1.0.  We use inverse weights between 1.0 and 2.0
@@ -589,53 +367,13 @@ T optionalHalve(T w) {    // return w >= 4 ? w / 2 : w;
   return as_double(u);
 }
 
-#endif
-
 #if HAS_ASM
 i32  lowBits(i32 u, u32 bits) { i32 tmp; __asm("v_bfe_i32 %0, %1, 0, %2" : "=v" (tmp) : "v" (u), "v" (bits)); return tmp; }
-u32 ulowBits(u32 u, u32 bits) { u32 tmp; __asm("v_bfe_u32 %0, %1, 0, %2" : "=v" (tmp) : "v" (u), "v" (bits)); return tmp; }
 i32 xtract32(i64 x, u32 bits) { i32 tmp; __asm("v_alignbit_b32 %0, %1, %2, %3" : "=v"(tmp) : "v"(as_int2(x).y), "v"(as_int2(x).x), "v"(bits)); return tmp; }
 #else
 i32  lowBits(i32 u, u32 bits) { return ((u << (32 - bits)) >> (32 - bits)); }
-u32 ulowBits(u32 u, u32 bits) { return ((u << (32 - bits)) >> (32 - bits)); }
 i32 xtract32(i64 x, u32 bits) { return ((i32) (x >> bits)); }
 #endif
-
-
-#if SP
-
-i32 split(float3 x, u32 nBits, i64 *outCarry) {
-  
-}
-
-OVERLOAD Word carryStep(T x, i64 inCarry, i64 *outCarry, bool isBigWord) {
-  u32 nBits = bitlen(isBigWord);
-  Word w = split(x, nBits, outCarry);
-  w = lowBits(inCarry + w, nBits);
-  *outCarry += (inCarry - w) >> nBits;
-  return w;
-}
-
-
-
-Word2 OVERLOAD carryPair(TT u, i64 *outCarry, bool b1, bool b2, i64 inCarry, u32* carryMax, bool exactness) {
-  iCARRY midCarry;
-  Word a = carryStep(doubleToLong(u.x, (iCARRY) 0) + inCarry, &midCarry, b1);
-  Word b = carryStep(doubleToLong(u.y, (iCARRY) 0) + midCarry, outCarry, b2);
-
-  return (Word2) (a, b);
-}
-
-Word2 OVERLOAD carryFinal(Word2 u, i64 inCarry, bool b1) {
-  i32 tmpCarry;
-  u.x = carryStep(u.x + inCarry, &tmpCarry, b1);
-  u.y += tmpCarry;
-  return u;
-}
-
-
-#else
-
 
 
 // We support two sizes of carry in carryFused.  A 32-bit carry halves the amount of memory used by CarryShuttle,
@@ -700,35 +438,33 @@ i64 OVERLOAD doubleToLong(double x, i64 inCarry) {
   return as_long(data);
 }
 
-const bool MUST_BE_EXACT = 0;
-const bool CAN_BE_INEXACT = 1;
-
-Word OVERLOAD carryStep(i64 x, i64 *outCarry, bool isBigWord, bool exactness) {
+Word OVERLOAD carryStep(i64 x, i64 *outCarry, bool isBigWord) {
   u32 nBits = bitlen(isBigWord);
-  Word w = (exactness == MUST_BE_EXACT) ? lowBits(x, nBits) : ulowBits(x, nBits);
-  if (exactness == MUST_BE_EXACT) { x -= w; }
+  Word w = lowBits(x, nBits);
+  x -= w;
   *outCarry = x >> nBits;
   return w;
 }
 
-Word OVERLOAD carryStep(i64 x, i32 *outCarry, bool isBigWord, bool exactness) {
+Word OVERLOAD carryStep(i64 x, i32 *outCarry, bool isBigWord) {
   u32 nBits = bitlen(isBigWord);
-  Word w = (exactness == MUST_BE_EXACT) ? lowBits(x, nBits) : ulowBits(x, nBits);
-// If nBits could 20 or more we must be careful.  doubleToLong generated x as 13 bits of trash and 51-bit signed value.
+  Word w = lowBits(x, nBits);
+
+// If nBits could be 20 or more we must be careful.  doubleToLong generated x as 13 bits of trash and 51-bit signed value.
 // If we right shift 20 bits we will shift some of the trash into outCarry.  First we must remove the trash bits.
 #if EXP / NWORDS >= 19
   *outCarry = as_int2(x << 13).y >> (nBits - 19);
 #else
   *outCarry = xtract32(x, nBits);
 #endif
-  if (exactness == MUST_BE_EXACT) { *outCarry += (w < 0); }
+  *outCarry += (w < 0);
   CARRY32_CHECK(*outCarry);
   return w;
 }
 
-Word OVERLOAD carryStep(i32 x, i32 *outCarry, bool isBigWord, bool exactness) {
+Word OVERLOAD carryStep(i32 x, i32 *outCarry, bool isBigWord) {
   u32 nBits = bitlen(isBigWord);
-  Word w = lowBits(x, nBits);		// I believe this version is only called with MUST_BE_EXACT
+  Word w = lowBits(x, nBits);
   *outCarry = (x - w) >> nBits;
   CARRY32_CHECK(*outCarry);
   return w;
@@ -740,19 +476,19 @@ typedef i32 CFcarry;
 typedef i64 CFcarry;
 #endif
 
+// In the carryMul situation there's an additional multiplication by 3, adding about 1.6bits to carry, so 32bits
+// is often not enough.
 typedef i64 CFMcarry;
 
 u32 bound(i64 carry) { return min(abs(carry), 0xfffffffful); }
 
 typedef TT T2;
 
-#endif // DP
-
 //{{ carries
-Word2 OVERLOAD carryPair(T2 u, iCARRY *outCarry, bool b1, bool b2, iCARRY inCarry, u32* carryMax, bool exactness) {
+Word2 OVERLOAD carryPair(T2 u, iCARRY *outCarry, bool b1, bool b2, iCARRY inCarry, u32* carryMax) {
   iCARRY midCarry;
-  Word a = carryStep(doubleToLong(u.x, (iCARRY) 0) + inCarry, &midCarry, b1, exactness);
-  Word b = carryStep(doubleToLong(u.y, (iCARRY) 0) + midCarry, outCarry, b2, MUST_BE_EXACT);
+  Word a = carryStep(doubleToLong(u.x, (iCARRY) 0) + inCarry, &midCarry, b1);
+  Word b = carryStep(doubleToLong(u.y, (iCARRY) 0) + midCarry, outCarry, b2);
 #if STATS
   *carryMax = max(*carryMax, max(bound(midCarry), bound(*outCarry)));
 #endif
@@ -761,7 +497,7 @@ Word2 OVERLOAD carryPair(T2 u, iCARRY *outCarry, bool b1, bool b2, iCARRY inCarr
 
 Word2 OVERLOAD carryFinal(Word2 u, iCARRY inCarry, bool b1) {
   i32 tmpCarry;
-  u.x = carryStep(u.x + inCarry, &tmpCarry, b1, MUST_BE_EXACT);
+  u.x = carryStep(u.x + inCarry, &tmpCarry, b1);
   u.y += tmpCarry;
   return u;
 }
@@ -771,10 +507,10 @@ Word2 OVERLOAD carryFinal(Word2 u, iCARRY inCarry, bool b1) {
 //== carries CARRY=32
 //== carries CARRY=64
 
-Word2 OVERLOAD carryPairMul(T2 u, i64 *outCarry, bool b1, bool b2, i64 inCarry, u32* carryMax, bool exactness) {
+Word2 OVERLOAD carryPairMul(T2 u, i64 *outCarry, bool b1, bool b2, i64 inCarry, u32* carryMax) {
   i64 midCarry;
-  Word a = carryStep(3 * doubleToLong(u.x, (i64) 0) + inCarry, &midCarry, b1, exactness);
-  Word b = carryStep(3 * doubleToLong(u.y, (i64) 0) + midCarry, outCarry, b2, MUST_BE_EXACT);
+  Word a = carryStep(3 * doubleToLong(u.x, (i64) 0) + inCarry, &midCarry, b1);
+  Word b = carryStep(3 * doubleToLong(u.y, (i64) 0) + midCarry, outCarry, b2);
 #if STATS
   *carryMax = max(*carryMax, max(bound(midCarry), bound(*outCarry)));
 #endif
@@ -783,8 +519,8 @@ Word2 OVERLOAD carryPairMul(T2 u, i64 *outCarry, bool b1, bool b2, i64 inCarry, 
 
 // Carry propagation from word and carry.
 Word2 carryWord(Word2 a, CarryABM* carry, bool b1, bool b2) {
-  a.x = carryStep(a.x + *carry, carry, b1, MUST_BE_EXACT);
-  a.y = carryStep(a.y + *carry, carry, b2, MUST_BE_EXACT);
+  a.x = carryStep(a.x + *carry, carry, b1);
+  a.y = carryStep(a.y + *carry, carry, b2);
   return a;
 }
 
@@ -795,6 +531,7 @@ T2 addsub(T2 a) { return U2(RE(a) + IM(a), RE(a) - IM(a)); }
 T2 addsub_m2(T2 a) { return U2(add1_m2(RE(a), IM(a)), sub1_m2(RE(a), IM(a))); }
 
 // computes 2*(a.x*b.x+a.y*b.y) + i*2*(a.x*b.y+a.y*b.x)
+// which happens to be the cyclical convolution (a.x, a.y)x(b.x, b.y) * 2
 T2 foo2(T2 a, T2 b) {
   a = addsub(a);
   b = addsub(b);
@@ -807,7 +544,7 @@ T2 foo2_m2(T2 a, T2 b) {
   return addsub_m2(U2(RE(a) * RE(b), IM(a) * IM(b)));
 }
 
-// computes 2*[x^2+y^2 + i*(2*x*y)]. Needs a name.
+// computes 2*[x^2+y^2 + i*(2*x*y)]. i.e. 2 * cyclical autoconvolution of (x, y)
 T2 foo(T2 a) { return foo2(a, a); }
 T2 foo_m2(T2 a) { return foo2_m2(a, a); }
 
@@ -834,96 +571,27 @@ T2 partial_cmul_conjugate(T2 a, T c_over_s) { return U2(mad1(RE(a), c_over_s, -I
 
 // a = c + sin * d; b = c - sin * d;
 #define fma_addsub(a, b, sin, c, d) { d = sin * d; T2 t = c + d; b = c - d; a = t; }
-// Like fma_addsub but muls result by -i.
-#define fma_addsub_mul_t4(a, b, sin, c, d) { fma_addsub (a, b, sin, c, d); b = mul_t4 (b); }
 
 // a * conjugate(b)
 // saves one negation
 T2 mul_by_conjugate(T2 a, T2 b) { return U2(RE(a) * RE(b) + IM(a) * IM(b), IM(a) * RE(b) - RE(a) * IM(b)); }
 
-// Combined complex mul and mul by conjugate.  Saves 4 multiplies compared to two complex mul calls. 
-void mul_and_mul_by_conjugate(T2 *res1, T2 *res2, T2 a, T2 b) {
-	T axbx = RE(a) * RE(b); T axby = RE(a) * IM(b); T aybx = IM(a) * RE(b); T ayby = IM(a) * IM(b);
-	res1->x = axbx - ayby; res1->y = axby + aybx;		// Complex mul
-	res2->x = axbx + ayby; res2->y = aybx - axby;		// Complex mul by conjugate
-}
-
 void fft4Core(T2 *u) {
   X2(u[0], u[2]);
-  X2_mul_t4(u[1], u[3]);
+  X2(u[1], u[3]); u[3] = mul_t4(u[3]);
   X2(u[0], u[1]);
   X2(u[2], u[3]);
 }
 
 void fft4(T2 *u) {
-  X2(u[0], u[2]);
-  X2_mul_t4(u[1], u[3]);
-  T2 t = u[2];
-  u[2] = u[0] - u[1];
-  u[0] = u[0] + u[1];
-  u[1] = t + u[3];
-  u[3] = t - u[3];
+   fft4Core(u);
+   // revbin [0 2 1 3] undo
+   SWAP(u[1], u[2]);
 }
 
 void fft2(T2* u) {
   X2(u[0], u[1]);
 }
-
-#if !OLD_FFT8 && !NEWEST_FFT8 && !NEW_FFT8
-#define OLD_FFT8 1
-#endif
-
-// In rocm 2.2 this is 53 f64 ops in testKernel -- one over optimal.  However, for me it is slower
-// than OLD_FFT8 when it used in "real" kernels.
-#if NEWEST_FFT8
-
-// Attempt to get more FMA by delaying mul by SQRT1_2
-T2 mul_t8_delayed(T2 a)  { return U2(IM(a) + RE(a), IM(a) - RE(a)); }
-#define X2_mul_3t8_delayed(a, b) { T2 t = a; a = t + b; t = b - t; RE(b) = t.x - t.y; IM(b) = t.x + t.y; }
-
-// Like X2 but second arg needs a multiplication by SQRT1_2
-#define X2_apply_SQRT1_2(a, b) { T2 t = a; \
-				 RE(a) = fma(RE(b), M_SQRT1_2, t.x); IM(a) = fma(IM(b), M_SQRT1_2, t.y); \
-				 RE(b) = fma(RE(b), -M_SQRT1_2, t.x); IM(b) = fma(IM(b), -M_SQRT1_2, t.y); }
-
-void fft4Core_delayed(T2 *u) {		// Same as fft4Core except u[1] and u[3] need to be multiplied by SQRT1_2
-  X2(u[0], u[2]);
-  X2_mul_t4(u[1], u[3]);		// Still need to apply SQRT1_2
-  X2_apply_SQRT1_2(u[0], u[1]);
-  X2_apply_SQRT1_2(u[2], u[3]);
-}
-
-void fft8Core(T2 *u) {
-  X2(u[0], u[4]);
-  X2(u[1], u[5]);
-  X2_mul_t4(u[2], u[6]);
-  X2_mul_3t8_delayed(u[3], u[7]);	// u[7] needs mul by SQRT1_2
-  u[5] = mul_t8_delayed(u[5]);		// u[5] needs mul by SQRT1_2
-
-  fft4Core(u);
-  fft4Core_delayed(u + 4);
-}
-
-// In rocm 2.2 this is 57 f64 ops in testKernel -- an ugly five over optimal.
-#elif NEW_FFT8
-
-// Same as X2(a, b), b = mul_3t8(b)
-//#define X2_mul_3t8(a, b) { T2 t=a; a = t+b; t = b-t; t.y *= M_SQRT1_2; b.x = t.x * M_SQRT1_2 - t.y; b.y = t.x * M_SQRT1_2 + t.y; }
-#define X2_mul_3t8(a, b) { T2 t=a; a = t+b; t = b-t; RE(b) = (t.x - t.y) * M_SQRT1_2; IM(b) = (t.x + t.y) * M_SQRT1_2; }
-
-void fft8Core(T2 *u) {
-  X2(u[0], u[4]);
-  X2(u[1], u[5]);
-  X2_mul_t4(u[2], u[6]);
-  X2_mul_3t8(u[3], u[7]);
-  u[5] = mul_t8(u[5]);
-
-  fft4Core(u);
-  fft4Core(u + 4);
-}
-
-// In rocm 2.2 this is 54 f64 ops in testKernel -- two over optimal.
-#elif OLD_FFT8
 
 void fft8Core(T2 *u) {
   X2(u[0], u[4]);
@@ -934,15 +602,12 @@ void fft8Core(T2 *u) {
   fft4Core(u + 4);
 }
 
-#endif
-
 void fft8(T2 *u) {
   fft8Core(u);
   // revbin [0, 4, 2, 6, 1, 5, 3, 7] undo
   SWAP(u[1], u[4]);
   SWAP(u[3], u[6]);
 }
-
 
 // FFT routines to implement the middle step
 
@@ -959,128 +624,11 @@ void fft3(T2 *u) {
   fft3by(u, 1);
 }
 
-#if !NEWEST_FFT5 && !NEW_FFT5 && !OLD_FFT5
-#define NEW_FFT5 1
-#endif
-
-// Adapted from: Nussbaumer, "Fast Fourier Transform and Convolution Algorithms", 5.5.4 "5-Point DFT".
-
-// Using rocm 2.9, testKernel shows this macro generates 38 f64 (8 FMA) ops, 26 vgprs.
-#if OLD_FFT5
-void fft5(T2 *u) {
-  const double SIN1 = 0x1.e6f0e134454ffp-1; // sin(tau/5), 0.95105651629515353118
-  const double SIN2 = 0x1.89f188bdcd7afp+0; // sin(tau/5) + sin(2*tau/5), 1.53884176858762677931
-  const double SIN3 = 0x1.73fd61d9df543p-2; // sin(tau/5) - sin(2*tau/5), 0.36327126400268044959
-  const double COS1 = 0x1.1e3779b97f4a8p-1; // (cos(tau/5) - cos(2*tau/5))/2, 0.55901699437494745126
-
-  X2(u[2], u[3]);
-  X2(u[1], u[4]);
-  X2(u[1], u[2]);
-
-  T2 tmp = u[0];
-  u[0] += u[1];
-  u[1] = u[1] * (-0.25) + tmp;
-
-  u[2] *= COS1;
-
-  tmp = (u[4] - u[3]) * SIN1;
-  tmp  = U2(tmp.y, -tmp.x);
-
-  u[3] = U2(u[3].y, -u[3].x) * SIN2 + tmp;
-  u[4] = U2(-u[4].y, u[4].x) * SIN3 + tmp;
-  SWAP(u[3], u[4]);
-
-  X2(u[1], u[2]);
-  X2(u[1], u[4]);
-  X2(u[2], u[3]);
-}
-
-// Using rocm 2.9, testKernel shows this macro generates an ideal 44 f64 ops (12 FMA) or 32 f64 ops (20 FMA), 30 vgprs.
-#elif NEW_FFT5
-
-// Above uses fewer FMAs.  Above may be faster if FMA latency cannot be masked.
-// Nussbaumer's ideas can be used to reduce FMAs -- see NEWEST_FFT5 implementation below.
-// See prime95's gwnum/zr5.mac file for more detailed explanation of the formulas below
-// R1= r1     +(r2+r5)     +(r3+r4)
-// R2= r1 +.309(r2+r5) -.809(r3+r4)    +.951(i2-i5) +.588(i3-i4)
-// R5= r1 +.309(r2+r5) -.809(r3+r4)    -.951(i2-i5) -.588(i3-i4)
-// R3= r1 -.809(r2+r5) +.309(r3+r4)    +.588(i2-i5) -.951(i3-i4)
-// R4= r1 -.809(r2+r5) +.309(r3+r4)    -.588(i2-i5) +.951(i3-i4)
-// I1= i1     +(i2+i5)     +(i3+i4)
-// I2= i1 +.309(i2+i5) -.809(i3+i4)    -.951(r2-r5) -.588(r3-r4)
-// I5= i1 +.309(i2+i5) -.809(i3+i4)    +.951(r2-r5) +.588(r3-r4)
-// I3= i1 -.809(i2+i5) +.309(i3+i4)    -.588(r2-r5) +.951(r3-r4)
-// I4= i1 -.809(i2+i5) +.309(i3+i4)    +.588(r2-r5) -.951(r3-r4)
-
-void fft5(T2 *u) {
-  const double SIN1 = 0x1.e6f0e134454ffp-1;		// sin(tau/5), 0.95105651629515353118
-  const double SIN2_SIN1 = 0.618033988749894848;	// sin(2*tau/5) / sin(tau/5) = .588/.951, 0.618033988749894848
-  const double COS1 = 0.309016994374947424;		// cos(tau/5), 0.309016994374947424
-  const double COS2 = 0.809016994374947424;		// -cos(2*tau/5), 0.809016994374947424
-
-  X2_mul_t4(u[1], u[4]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[3]);				// (r3+ i3+),  (i3- -r3-)
-
-  T2 tmp25a = fmaT2(COS1, u[1], u[0]);
-  T2 tmp34a = fmaT2(-COS2, u[1], u[0]);
-  u[0] = u[0] + u[1];
-
-  T2 tmp25b = fmaT2(SIN2_SIN1, u[3], u[4]);		// (i2- +.588/.951*i3-, -r2- -.588/.951*r3-)
-  T2 tmp34b = fmaT2(SIN2_SIN1, u[4], -u[3]);		// (.588/.951*i2- -i3-, -.588/.951*r2- +r3-)
-
-  tmp25a = fmaT2(-COS2, u[2], tmp25a);
-  tmp34a = fmaT2(COS1, u[2], tmp34a);
-  u[0] = u[0] + u[2];
-
-  fma_addsub(u[1], u[4], SIN1, tmp25a, tmp25b);
-  fma_addsub(u[2], u[3], SIN1, tmp34a, tmp34b);
-}
-
-// Using rocm 2.9, testKernel shows this macro generates an ideal 44 f64 ops (12 FMA) or 32 f64 ops (20 FMA), 30 vgprs.
-#elif NEWEST_FFT5
-
-// Nussbaumer's ideas used to introduce more PREFER_NOFMA opportunities in the code below.
-// Modified prime95's formulas:
-// R1= r1 + ((r2+r5)+(r3+r4))
-// R2= r1 - ((r2+r5)+(r3+r4))/4 +.559((r2+r5)-(r3+r4))    +.951(i2-i5) +.588(i3-i4)
-// R5= r1 - ((r2+r5)+(r3+r4))/4 +.559((r2+r5)-(r3+r4))    -.951(i2-i5) -.588(i3-i4)
-// R3= r1 - ((r2+r5)+(r3+r4))/4 -.559((r2+r5)-(r3+r4))    +.588(i2-i5) -.951(i3-i4)
-// R4= r1 - ((r2+r5)+(r3+r4))/4 -.559((r2+r5)-(r3+r4))    -.588(i2-i5) +.951(i3-i4)
-// I1= i1 + ((i2+i5)+(i3+i4))
-// I2= i1 - ((i2+i5)+(i3+i4))/4 +.559((i2+i5)-(i3+i4))    -.951(r2-r5) -.588(r3-r4)
-// I5= i1 - ((i2+i5)+(i3+i4))/4 +.559((i2+i5)-(i3+i4))    +.951(r2-r5) +.588(r3-r4)
-// I3= i1 - ((i2+i5)+(i3+i4))/4 -.559((i2+i5)-(i3+i4))    -.588(r2-r5) +.951(r3-r4)
-// I4= i1 - ((i2+i5)+(i3+i4))/4 -.559((i2+i5)-(i3+i4))    +.588(r2-r5) -.951(r3-r4)
-
-void fft5(T2 *u) {
-  const double SIN1 = 0x1.e6f0e134454ffp-1;		// sin(tau/5), 0.95105651629515353118
-  const double SIN2_SIN1 = 0.618033988749894848;	// sin(2*tau/5) / sin(tau/5) = .588/.951, 0.618033988749894848
-  const double COS12 = 0x1.1e3779b97f4a8p-1;		// (cos(tau/5) - cos(2*tau/5))/2, 0.55901699437494745126
-
-  X2_mul_t4(u[1], u[4]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[3]);				// (r3+ i3+),  (i3- -r3-)
-  X2(u[1], u[2]);					// (r2++ i2++), (r2+- i2+-)
-
-  T2 tmp2345a = fmaT2(-0.25, u[1], u[0]);
-  u[0] = u[0] + u[1];
-
-  T2 tmp25b = fmaT2(SIN2_SIN1, u[3], u[4]);		// (i2- +.588/.951*i3-, -r2- -.588/.951*r3-)
-  T2 tmp34b = fmaT2(SIN2_SIN1, u[4], -u[3]);		// (.588/.951*i2- -i3-, -.588/.951*r2- +r3-)
-
-  T2 tmp25a, tmp34a;
-  fma_addsub(tmp25a, tmp34a, COS12, tmp2345a, u[2]);
-
-  fma_addsub(u[1], u[4], SIN1, tmp25a, tmp25b);
-  fma_addsub(u[2], u[3], SIN1, tmp34a, tmp34b);
-}
-#else
-#error None of OLD_FFT5, NEW_FFT5, NEWEST_FFT5 defined
-#endif
-
+#include "fft5.cl"
 
 void fft6(T2 *u) {
-  const double COS1 = -0.5;					// cos(tau/3), -0.5
-  const double SIN1 = 0.86602540378443864676372317075294;	// sin(tau/3), sqrt(3)/2, 0.86602540378443864676372317075294
+  const double COS1 = -0.5;					                  // cos(tau/3) == -0.5
+  const double SIN1 = 0.86602540378443864676372317075294;	// sin(tau/3) == sqrt(3)/2
 
   X2(u[0], u[3]);						// (r1+ i1+),  (r1-  i1-)
   X2_mul_t4(u[1], u[4]);					// (r2+ i2+),  (i2- -r2-)
@@ -1098,779 +646,14 @@ void fft6(T2 *u) {
   fma_addsub(u[2], u[4], SIN1, tmp35a, u[2]);
 }
 
-
-// See prime95's gwnum/zr7.mac file for more detailed explanation of the formulas below
-// R1= r1     +(r2+r7)     +(r3+r6)     +(r4+r5)
-// R2= r1 +.623(r2+r7) -.223(r3+r6) -.901(r4+r5)  +(.782(i2-i7) +.975(i3-i6) +.434(i4-i5))
-// R7= r1 +.623(r2+r7) -.223(r3+r6) -.901(r4+r5)  -(.782(i2-i7) +.975(i3-i6) +.434(i4-i5))
-// R3= r1 -.223(r2+r7) -.901(r3+r6) +.623(r4+r5)  +(.975(i2-i7) -.434(i3-i6) -.782(i4-i5))
-// R6= r1 -.223(r2+r7) -.901(r3+r6) +.623(r4+r5)  -(.975(i2-i7) -.434(i3-i6) -.782(i4-i5))
-// R4= r1 -.901(r2+r7) +.623(r3+r6) -.223(r4+r5)  +(.434(i2-i7) -.782(i3-i6) +.975(i4-i5))
-// R5= r1 -.901(r2+r7) +.623(r3+r6) -.223(r4+r5)  -(.434(i2-i7) -.782(i3-i6) +.975(i4-i5))
-
-// I1= i1     +(i2+i7)     +(i3+i6)     +(i4+i5)
-// I2= i1 +.623(i2+i7) -.223(i3+i6) -.901(i4+i5)  -(.782(r2-r7) +.975(r3-r6) +.434(r4-r5))
-// I7= i1 +.623(i2+i7) -.223(i3+i6) -.901(i4+i5)  +(.782(r2-r7) +.975(r3-r6) +.434(r4-r5))
-// I3= i1 -.223(i2+i7) -.901(i3+i6) +.623(i4+i5)  -(.975(r2-r7) -.434(r3-r6) -.782(r4-r5))
-// I6= i1 -.223(i2+i7) -.901(i3+i6) +.623(i4+i5)  +(.975(r2-r7) -.434(r3-r6) -.782(r4-r5))
-// I4= i1 -.901(i2+i7) +.623(i3+i6) -.223(i4+i5)  -(.434(r2-r7) -.782(r3-r6) +.975(r4-r5))
-// I5= i1 -.901(i2+i7) +.623(i3+i6) -.223(i4+i5)  +(.434(r2-r7) -.782(r3-r6) +.975(r4-r5))
-
-void fft7(T2 *u) {
-  const double COS1 = 0.6234898018587335305;		// cos(tau/7)
-  const double COS2 = -0.2225209339563144043;		// cos(2*tau/7)
-  const double COS3 = -0.9009688679024191262;		// cos(3*tau/7)
-  const double SIN1 = 0.781831482468029809;		// sin(tau/7)
-  const double SIN2_SIN1 = 1.2469796037174670611;	// sin(2*tau/7) / sin(tau/7) = .975/.782
-  const double SIN3_SIN1 = 0.5549581320873711914;	// sin(3*tau/7) / sin(tau/7) = .434/.782
-
-  X2_mul_t4(u[1], u[6]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[5]);				// (r3+ i3+),  (i3- -r3-)
-  X2_mul_t4(u[3], u[4]);				// (r4+ i4+),  (i4- -r4-)
-
-  T2 tmp27a = fmaT2(COS1, u[1], u[0]);
-  T2 tmp36a = fmaT2(COS2, u[1], u[0]);
-  T2 tmp45a = fmaT2(COS3, u[1], u[0]);
-  u[0] = u[0] + u[1];
-
-  tmp27a = fmaT2(COS2, u[2], tmp27a);
-  tmp36a = fmaT2(COS3, u[2], tmp36a);
-  tmp45a = fmaT2(COS1, u[2], tmp45a);
-  u[0] = u[0] + u[2];
-
-  tmp27a = fmaT2(COS3, u[3], tmp27a);
-  tmp36a = fmaT2(COS1, u[3], tmp36a);
-  tmp45a = fmaT2(COS2, u[3], tmp45a);
-  u[0] = u[0] + u[3];
-
-  T2 tmp27b = fmaT2(SIN2_SIN1, u[5], u[6]);		// .975/.782
-  T2 tmp36b = fmaT2(SIN2_SIN1, u[6], -u[4]);
-  T2 tmp45b = fmaT2(SIN2_SIN1, u[4], -u[5]);
-
-  tmp27b = fmaT2(SIN3_SIN1, u[4], tmp27b);		// .434/.782
-  tmp36b = fmaT2(SIN3_SIN1, -u[5], tmp36b);
-  tmp45b = fmaT2(SIN3_SIN1, u[6], tmp45b);
-
-  fma_addsub(u[1], u[6], SIN1, tmp27a, tmp27b);
-  fma_addsub(u[2], u[5], SIN1, tmp36a, tmp36b);
-  fma_addsub(u[3], u[4], SIN1, tmp45a, tmp45b);
-}
-
-// See prime95's gwnum/zr8.mac file for more detailed explanation of the formulas below
-// R1 = ((r1+r5)+(r3+r7)) +((r2+r6)+(r4+r8))
-// R5 = ((r1+r5)+(r3+r7)) -((r2+r6)+(r4+r8))
-// R3 = ((r1+r5)-(r3+r7))                                    +((i2+i6)-(i4+i8))
-// R7 = ((r1+r5)-(r3+r7))                                    -((i2+i6)-(i4+i8))
-// R2 = ((r1-r5)      +.707((r2-r6)-(r4-r8)))  + ((i3-i7)+.707((i2-i6)+(i4-i8)))
-// R8 = ((r1-r5)      +.707((r2-r6)-(r4-r8)))  - ((i3-i7)+.707((i2-i6)+(i4-i8)))
-// R4 = ((r1-r5)      -.707((r2-r6)-(r4-r8)))  - ((i3-i7)-.707((i2-i6)+(i4-i8)))
-// R6 = ((r1-r5)      -.707((r2-r6)-(r4-r8)))  + ((i3-i7)-.707((i2-i6)+(i4-i8)))
-
-// I1 = ((i1+i5)+(i3+i7)) +((i2+i6)+(i4+i8))
-// I5 = ((i1+i5)+(i3+i7)) -((i2+i6)+(i4+i8))
-// I3 = ((i1+i5)-(i3+i7))                                    -((r2+r6)-(r4+r8))
-// I7 = ((i1+i5)-(i3+i7))                                    +((r2+r6)-(r4+r8))
-// I2 = ((i1-i5)      +.707((i2-i6)-(i4-i8)))  - ((r3-r7)+.707((r2-r6)+(r4-r8)))
-// I8 = ((i1-i5)      +.707((i2-i6)-(i4-i8)))  + ((r3-r7)+.707((r2-r6)+(r4-r8)))
-// I4 = ((i1-i5)      -.707((i2-i6)-(i4-i8)))  + ((r3-r7)-.707((r2-r6)+(r4-r8)))
-// I6 = ((i1-i5)      -.707((i2-i6)-(i4-i8)))  - ((r3-r7)-.707((r2-r6)+(r4-r8)))
-
-void fft8mid(T2 *u) {
-  X2(u[0], u[4]);					// (r1+ i1+), (r1-  i1-)
-  X2_mul_t4(u[1], u[5]);				// (r2+ i2+), (i2- -r2-)
-  X2_mul_t4(u[2], u[6]);				// (r3+ i3+), (i3- -r3-)
-  X2_mul_t4(u[3], u[7]);				// (r4+ i4+), (i4- -r4-)
-
-  X2(u[0], u[2]);					// (r1++  i1++), ( r1+-  i1+-)
-  X2_mul_t4(u[1], u[3]);				// (r2++  i2++), ( i2+- -r2+-)
-  X2_mul_t4(u[5], u[7]);				// (i2-+ -r2-+), (-r2-- -i2--)
-
-  T2 tmp28a = fmaT2(-M_SQRT1_2, u[7], u[4]);
-  T2 tmp46a = fmaT2(M_SQRT1_2, u[7], u[4]);
-  T2 tmp28b = fmaT2(M_SQRT1_2, u[5], u[6]);
-  T2 tmp46b = fmaT2(-M_SQRT1_2, u[5], u[6]);
-
-  u[4] = u[0] - u[1];
-  u[0] = u[0] + u[1];
-  u[6] = u[2] - u[3];
-  u[2] = u[2] + u[3];
-
-  u[1] = tmp28a + tmp28b;
-  u[7] = tmp28a - tmp28b;
-  u[3] = tmp46a - tmp46b;
-  u[5] = tmp46a + tmp46b;
-}
-
-
-#if !NEW_FFT9 && !OLD_FFT9
-#define NEW_FFT9 1
-#endif
-
-#if OLD_FFT9
-// Adapted from: Nussbaumer, "Fast Fourier Transform and Convolution Algorithms", 5.5.7 "9-Point DFT".
-void fft9(T2 *u) {
-  const double C0 = 0x1.8836fa2cf5039p-1; //   0.766044443118978013 (2*c(u) - c(2*u) - c(4*u))/3
-  const double C1 = 0x1.e11f642522d1cp-1; //   0.939692620785908428 (c(u) + c(2*u) - 2*c(4*u))/3
-  const double C2 = 0x1.63a1a7e0b738ap-3; //   0.173648177666930359 -(c(u) - 2*c(2*u) + c(4*u))/3
-  const double C3 = 0x1.bb67ae8584caap-1; //   0.866025403784438597 s(3*u)
-  const double C4 = 0x1.491b7523c161dp-1; //   0.642787609686539363 s(u)
-  const double C5 = 0x1.5e3a8748a0bf5p-2; //   0.342020143325668713 s(4*u)
-  const double C6 = 0x1.f838b8c811c17p-1; //   0.984807753012208020 s(2*u)
-
-  X2(u[1], u[8]);
-  X2(u[2], u[7]);
-  X2(u[3], u[6]);
-  X2(u[4], u[5]);
-
-  T2 m4 = (u[2] - u[4]) * C1;
-  T2 s0 = (u[2] - u[1]) * C0 - m4;
-
-  X2(u[1], u[4]);
-  
-  T2 t5 = u[1] + u[2];
-  
-  T2 m8  = mul_t4(u[7] + u[8]) * C4;
-  T2 m10 = mul_t4(u[5] - u[8]) * C6;
-
-  X2(u[5], u[7]);
-  
-  T2 m9  = mul_t4(u[5]) * C5;
-  T2 t10 = u[8] + u[7];
-  
-  T2 s2 = m8 + m9;
-  u[5] = m9 - m10;
-
-  u[2] = u[0] - u[3] / 2;
-  u[0] += u[3];
-  u[3] = u[0] - t5 / 2;
-  u[0] += t5;
-  
-  u[7] = mul_t4(u[6]) * C3;
-  u[8] = u[7] + s2;
-  u[6] = mul_t4(t10)  * C3;
-
-  u[1] = u[2] - s0;
-
-  u[4] = u[4] * C2 - m4;
-  
-  X2(u[2], u[4]);
-  
-  u[4] += s0;
-
-  X2(u[5], u[7]);
-  u[5] -= s2;
-  
-  X2(u[4], u[5]);
-  X2(u[3], u[6]);  
-  X2(u[2], u[7]);
-  X2(u[1], u[8]);
-}
-
-#elif NEW_FFT9
-
-// 3 complex FFT where second input needs to be multiplied by SIN1 and third input needs to multiplied by SIN2
-void fft3delayedSIN12(T2 *u) {
-  const double SIN2_SIN1 = 1.5320888862379560704047853011108;	// sin(2*tau/9) / sin(tau/9) = .985/.643
-  const double COS1SIN1 = -0.32139380484326966316132170495363;	// cos(tau/3) * sin(tau/9) = -.5 * .643
-  const double SIN1SIN1 = 0.55667039922641936645291295204702;	// sin(tau/3) * sin(tau/9) = .866 * .643
-  const double SIN1 = 0.64278760968653932632264340990726;	// sin(tau/9) = .643 
-  fma_addsub_mul_t4(u[1], u[2], SIN2_SIN1, u[1], u[2]);		// (r2+r3 i2+i3),  (i2-i3 -(r2-r3))	we owe results a mul by SIN1
-  T2 tmp23 = u[0] + COS1SIN1 * u[1];
-  u[0] = u[0] + SIN1 * u[1];
-  fma_addsub (u[1], u[2], SIN1SIN1, tmp23, u[2]);
-}
-
-// This version is faster (fewer F64 ops), but slightly less accurate
-void fft9(T2 *u) {
-  const double COS1_SIN1 = 1.1917535925942099587053080718604;	// cos(tau/9) / sin(tau/9) = .766/.643
-  const double COS2_SIN2 = 0.17632698070846497347109038686862;	// cos(2*tau/9) / sin(2*tau/9) = .174/.985
-
-  fft3by(u, 3);
-  fft3by(u+1, 3);
-  fft3by(u+2, 3);
-
-  u[4] = partial_cmul(u[4], COS1_SIN1);			// mul u[4] by w^1, we owe result a mul by SIN1
-  u[7] = partial_cmul_conjugate(u[7], COS1_SIN1);	// mul u[7] by w^-1, we owe result a mul by SIN1
-  u[5] = partial_cmul(u[5], COS2_SIN2);			// mul u[5] by w^2, we owe result a mul by SIN2
-  u[8] = partial_cmul_conjugate(u[8], COS2_SIN2);	// mul u[8] by w^-2, we owe result a mul by SIN2
-
-  fft3(u);
-  fft3delayedSIN12(u+3);
-  fft3delayedSIN12(u+6);
-
-  // fix order [0, 3, 6, 1, 4, 7, 8, 2, 5]
-
-  T2 tmp = u[1];
-  u[1] = u[3];
-  u[3] = tmp;
-  tmp = u[2];
-  u[2] = u[7];
-  u[7] = u[5];
-  u[5] = u[8];
-  u[8] = u[6];
-  u[6] = tmp;
-}
-#endif
-
-
-// See prime95's gwnum/zr10.mac file for more detailed explanation of the formulas below
-//R1 = (r1+r6)     +((r2+r7)+(r5+r10))     +((r3+r8)+(r4+r9))
-//R3 = (r1+r6) +.309((r2+r7)+(r5+r10)) -.809((r3+r8)+(r4+r9)) +.951((i2+i7)-(i5+i10)) +.588((i3+i8)-(i4+i9))
-//R9 = (r1+r6) +.309((r2+r7)+(r5+r10)) -.809((r3+r8)+(r4+r9)) -.951((i2+i7)-(i5+i10)) -.588((i3+i8)-(i4+i9))
-//R5 = (r1+r6) -.809((r2+r7)+(r5+r10)) +.309((r3+r8)+(r4+r9)) +.588((i2+i7)-(i5+i10)) -.951((i3+i8)-(i4+i9))
-//R7 = (r1+r6) -.809((r2+r7)+(r5+r10)) +.309((r3+r8)+(r4+r9)) -.588((i2+i7)-(i5+i10)) +.951((i3+i8)-(i4+i9))
-//R6 = (r1-r6)     -((r2-r7)-(r5-r10))     +((r3-r8)-(r4-r9))
-//R2 = (r1-r6) +.809((r2-r7)-(r5-r10)) +.309((r3-r8)-(r4-r9)) +.588((i2-i7)+(i5-i10)) +.951((i3-i8)+(i4-i9))
-//R10= (r1-r6) +.809((r2-r7)-(r5-r10)) +.309((r3-r8)-(r4-r9)) -.588((i2-i7)+(i5-i10)) -.951((i3-i8)+(i4-i9))
-//R4 = (r1-r6) -.309((r2-r7)-(r5-r10)) -.809((r3-r8)-(r4-r9)) +.951((i2-i7)+(i5-i10)) -.588((i3-i8)+(i4-i9))
-//R8 = (r1-r6) -.309((r2-r7)-(r5-r10)) -.809((r3-r8)-(r4-r9)) -.951((i2-i7)+(i5-i10)) +.588((i3-i8)+(i4-i9))
-
-//I1 = (i1+i6)     +((i2+i7)+(i5+i10))     +((i3+i8)+(i4+i9))
-//I3 = (i1+i6) +.309((i2+i7)+(i5+i10)) -.809((i3+i8)+(i4+i9)) -.951((r2+r7)-(r5+r10)) -.588((r3+r8)-(r4+r9))
-//I9 = (i1+i6) +.309((i2+i7)+(i5+i10)) -.809((i3+i8)+(i4+i9)) +.951((r2+r7)-(r5+r10)) +.588((r3+r8)-(r4+r9))
-//I5 = (i1+i6) -.809((i2+i7)+(i5+i10)) +.309((i3+i8)+(i4+i9)) -.588((r2+r7)-(r5+r10)) +.951((r3+r8)-(r4+r9))
-//I7 = (i1+i6) -.809((i2+i7)+(i5+i10)) +.309((i3+i8)+(i4+i9)) +.588((r2+r7)-(r5+r10)) -.951((r3+r8)-(r4+r9))
-//I6 = (i1-i6)     -((i2-i7)-(i5-i10))     +((i3-i8)-(i4-i9))
-//I2 = (i1-i6) +.809((i2-i7)-(i5-i10)) +.309((i3-i8)-(i4-i9)) -.588((r2-r7)+(r5-r10)) -.951((r3-r8)+(r4-r9))
-//I10= (i1-i6) +.809((i2-i7)-(i5-i10)) +.309((i3-i8)-(i4-i9)) +.588((r2-r7)+(r5-r10)) +.951((r3-r8)+(r4-r9))
-//I4 = (i1-i6) -.309((i2-i7)-(i5-i10)) -.809((i3-i8)-(i4-i9)) -.951((r2-r7)+(r5-r10)) +.588((r3-r8)+(r4-r9))
-//I8 = (i1-i6) -.309((i2-i7)-(i5-i10)) -.809((i3-i8)-(i4-i9)) +.951((r2-r7)+(r5-r10)) -.588((r3-r8)+(r4-r9))
-
-void fft10(T2 *u) {
-  const double SIN1 = 0x1.e6f0e134454ffp-1;		// sin(tau/5), 0.95105651629515353118
-  const double SIN2_SIN1 = 0.618033988749894848;	// sin(2*tau/5) / sin(tau/5) = .588/.951, 0.618033988749894848
-  const double COS1 = 0.309016994374947424;		// cos(tau/5), 0.309016994374947424
-  const double COS2 = -0.809016994374947424;		// cos(2*tau/5), 0.809016994374947424
-
-  X2(u[0], u[5]);					// (r1+ i1+),  (r1-  i1-)
-  X2_mul_t4(u[1], u[6]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[7]);				// (r3+ i3+),  (i3- -r3-)
-  X2_mul_t4(u[3], u[8]);				// (r4+ i4+),  (i4- -r4-)
-  X2_mul_t4(u[4], u[9]);				// (r5+ i5+),  (i5- -r5-)
-
-  X2_mul_t4(u[1], u[4]);				// (r2++  i2++),  (i2+- -r2+-)
-  X2_mul_t4(u[2], u[3]);				// (r3++  i3++),  (i3+- -r3+-)
-  X2_mul_t4(u[6], u[9]);				// (i2-+ -r2-+), (-r2-- -i2--)
-  X2_mul_t4(u[7], u[8]);				// (i3-+ -r3-+), (-r3-- -i3--)
-
-  T2 tmp39a = fmaT2(COS1, u[1], u[0]);
-  T2 tmp57a = fmaT2(COS2, u[1], u[0]);
-  u[0] = u[0] + u[1];
-  T2 tmp210a = fmaT2(COS2, u[9], u[5]);
-  T2 tmp48a = fmaT2(COS1, u[9], u[5]);
-  u[5] = u[5] + u[9];
-
-  tmp39a = fmaT2(COS2, u[2], tmp39a);
-  tmp57a = fmaT2(COS1, u[2], tmp57a);
-  u[0] = u[0] + u[2];
-  tmp210a = fmaT2(COS1, -u[8], tmp210a);
-  tmp48a = fmaT2(COS2, -u[8], tmp48a);
-  u[5] = u[5] - u[8];
-
-  T2 tmp39b = fmaT2(SIN2_SIN1, u[3], u[4]);		// (i2+- +.588/.951*i3+-, -r2+- -.588/.951*r3+-)
-  T2 tmp57b = fmaT2(SIN2_SIN1, u[4], -u[3]);		// (.588/.951*i2+- -i3+-, -.588/.951*r2+- +r3+-)
-  T2 tmp210b = fmaT2(SIN2_SIN1, u[6], u[7]);		// (.588/.951*i2-+ +i3-+, -.588/.951*r2-+ -r3-+)
-  T2 tmp48b = fmaT2(SIN2_SIN1, -u[7], u[6]);		// (i2-+ -.588/.951*i3-+, -r2-+ +.588/.951*r3-+)
-
-  fma_addsub(u[1], u[9], SIN1, tmp210a, tmp210b);
-  fma_addsub(u[2], u[8], SIN1, tmp39a, tmp39b);
-  fma_addsub(u[3], u[7], SIN1, tmp48a, tmp48b);
-  fma_addsub(u[4], u[6], SIN1, tmp57a, tmp57b);
-}
-
-
-// See prime95's gwnum/zr11.mac file for more detailed explanation of the formulas below
-// R1 = r1     +(r2+r11)     +(r3+r10)     +(r4+r9)     +(r5+r8)     +(r6+r7)
-// R2 = r1 +.841(r2+r11) +.415(r3+r10) -.142(r4+r9) -.655(r5+r8) -.959(r6+r7)  +(.541(i2-i11) +.910(i3-i10) +.990(i4-i9) +.756(i5-i8) +.282(i6-i7))
-// R11= r1 +.841(r2+r11) +.415(r3+r10) -.142(r4+r9) -.655(r5+r8) -.959(r6+r7)  -(.541(i2-i11) +.910(i3-i10) +.990(i4-i9) +.756(i5-i8) +.282(i6-i7))
-// R3 = r1 +.415(r2+r11) -.655(r3+r10) -.959(r4+r9) -.142(r5+r8) +.841(r6+r7)  +(.910(i2-i11) +.756(i3-i10) -.282(i4-i9) -.990(i5-i8) -.541(i6-i7))
-// R10= r1 +.415(r2+r11) -.655(r3+r10) -.959(r4+r9) -.142(r5+r8) +.841(r6+r7)  -(.910(i2-i11) +.756(i3-i10) -.282(i4-i9) -.990(i5-i8) -.541(i6-i7))
-// R4 = r1 -.142(r2+r11) -.959(r3+r10) +.415(r4+r9) +.841(r5+r8) -.655(r6+r7)  +(.990(i2-i11) -.282(i3-i10) -.910(i4-i9) +.541(i5-i8) +.756(i6-i7))
-// R9 = r1 -.142(r2+r11) -.959(r3+r10) +.415(r4+r9) +.841(r5+r8) -.655(r6+r7)  -(.990(i2-i11) -.282(i3-i10) -.910(i4-i9) +.541(i5-i8) +.756(i6-i7))
-// R5 = r1 -.655(r2+r11) -.142(r3+r10) +.841(r4+r9) -.959(r5+r8) +.415(r6+r7)  +(.756(i2-i11) -.990(i3-i10) +.541(i4-i9) +.282(i5-i8) -.910(i6-i7))
-// R8 = r1 -.655(r2+r11) -.142(r3+r10) +.841(r4+r9) -.959(r5+r8) +.415(r6+r7)  -(.756(i2-i11) -.990(i3-i10) +.541(i4-i9) +.282(i5-i8) -.910(i6-i7))
-// R6 = r1 -.959(r2+r11) +.841(r3+r10) -.655(r4+r9) +.415(r5+r8) -.142(r6+r7)  +(.282(i2-i11) -.541(i3-i10) +.756(i4-i9) -.910(i5-i8) +.990(i6-i7))
-// R7 = r1 -.959(r2+r11) +.841(r3+r10) -.655(r4+r9) +.415(r5+r8) -.142(r6+r7)  -(.282(i2-i11) -.541(i3-i10) +.756(i4-i9) -.910(i5-i8) +.990(i6-i7))
-
-// I1 = i1     +(i2+i11)     +(i3+i10)     +(i4+i9)     +(i5+i8)     +(i6+i7)
-// I2 = i1 +.841(i2+i11) +.415(i3+i10) -.142(i4+i9) -.655(i5+i8) -.959(i6+i7)  -(.541(r2-r11) +.910(r3-r10) +.990(r4-r9) +.756(r5-r8) +.282(r6-r7))
-// I11= i1 +.841(i2+i11) +.415(i3+i10) -.142(i4+i9) -.655(i5+i8) -.959(i6+i7)  +(.541(r2-r11) +.910(r3-r10) +.990(r4-r9) +.756(r5-r8) +.282(r6-r7))
-// I3 = i1 +.415(i2+i11) -.655(i3+i10) -.959(i4+i9) -.142(i5+i8) +.841(i6+i7)  -(.910(r2-r11) +.756(r3-r10) -.282(r4-r9) -.990(r5-r8) -.541(r6-r7))
-// I10= i1 +.415(i2+i11) -.655(i3+i10) -.959(i4+i9) -.142(i5+i8) +.841(i6+i7)  +(.910(r2-r11) +.756(r3-r10) -.282(r4-r9) -.990(r5-r8) -.541(r6-r7))
-// I4 = i1 -.142(i2+i11) -.959(i3+i10) +.415(i4+i9) +.841(i5+i8) -.655(i6+i7)  -(.990(r2-r11) -.282(r3-r10) -.910(r4-r9) +.541(r5-r8) +.756(r6-r7))
-// I9 = i1 -.142(i2+i11) -.959(i3+i10) +.415(i4+i9) +.841(i5+i8) -.655(i6+i7)  +(.990(r2-r11) -.282(r3-r10) -.910(r4-r9) +.541(r5-r8) +.756(r6-r7))
-// I5 = i1 -.655(i2+i11) -.142(i3+i10) +.841(i4+i9) -.959(i5+i8) +.415(i6+i7)  -(.756(r2-r11) -.990(r3-r10) +.541(r4-r9) +.282(r5-r8) -.910(r6-r7))
-// I8 = i1 -.655(i2+i11) -.142(i3+i10) +.841(i4+i9) -.959(i5+i8) +.415(i6+i7)  +(.756(r2-r11) -.990(r3-r10) +.541(r4-r9) +.282(r5-r8) -.910(r6-r7))
-// I6 = i1 -.959(i2+i11) +.841(i3+i10) -.655(i4+i9) +.415(i5+i8) -.142(i6+i7)  -(.282(r2-r11) -.541(r3-r10) +.756(r4-r9) -.910(r5-r8) +.990(r6-r7))
-// I7 = i1 -.959(i2+i11) +.841(i3+i10) -.655(i4+i9) +.415(i5+i8) -.142(i6+i7)  +(.282(r2-r11) -.541(r3-r10) +.756(r4-r9) -.910(r5-r8) +.990(r6-r7))
-
-void fft11(T2 *u) {
-  const double COS1 = 0.8412535328311811688;		// cos(tau/11)
-  const double COS2 = 0.4154150130018864255;		// cos(2*tau/11)
-  const double COS3 = -0.1423148382732851404;		// cos(3*tau/11)
-  const double COS4 = -0.6548607339452850640;		// cos(4*tau/11)
-  const double COS5 = -0.9594929736144973898;		// cos(5*tau/11)
-  const double SIN1 = 0.5406408174555975821;		// sin(tau/11)
-  const double SIN2_SIN1 = 1.682507065662362337;	// sin(2*tau/11) / sin(tau/11) = .910/.541
-  const double SIN3_SIN1 = 1.830830026003772851;	// sin(3*tau/11) / sin(tau/11) = .990/.541
-  const double SIN4_SIN1 = 1.397877389115792056;	// sin(4*tau/11) / sin(tau/11) = .756/.541
-  const double SIN5_SIN1 = 0.521108558113202723;	// sin(5*tau/11) / sin(tau/11) = .282/.541
-
-  X2_mul_t4(u[1], u[10]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[9]);				// (r3+ i3+),  (i3- -r3-)
-  X2_mul_t4(u[3], u[8]);				// (r4+ i4+),  (i4- -r4-)
-  X2_mul_t4(u[4], u[7]);				// (r5+ i5+),  (i5- -r5-)
-  X2_mul_t4(u[5], u[6]);				// (r6+ i6+),  (i6- -r6-)
-
-  T2 tmp211a = fmaT2(COS1, u[1], u[0]);
-  T2 tmp310a = fmaT2(COS2, u[1], u[0]);
-  T2 tmp49a = fmaT2(COS3, u[1], u[0]);
-  T2 tmp58a = fmaT2(COS4, u[1], u[0]);
-  T2 tmp67a = fmaT2(COS5, u[1], u[0]);
-  u[0] = u[0] + u[1];
-
-  tmp211a = fmaT2(COS2, u[2], tmp211a);
-  tmp310a = fmaT2(COS4, u[2], tmp310a);
-  tmp49a = fmaT2(COS5, u[2], tmp49a);
-  tmp58a = fmaT2(COS3, u[2], tmp58a);
-  tmp67a = fmaT2(COS1, u[2], tmp67a);
-  u[0] = u[0] + u[2];
-
-  tmp211a = fmaT2(COS3, u[3], tmp211a);
-  tmp310a = fmaT2(COS5, u[3], tmp310a);
-  tmp49a = fmaT2(COS2, u[3], tmp49a);
-  tmp58a = fmaT2(COS1, u[3], tmp58a);
-  tmp67a = fmaT2(COS4, u[3], tmp67a);
-  u[0] = u[0] + u[3];
-
-  tmp211a = fmaT2(COS4, u[4], tmp211a);
-  tmp310a = fmaT2(COS3, u[4], tmp310a);
-  tmp49a = fmaT2(COS1, u[4], tmp49a);
-  tmp58a = fmaT2(COS5, u[4], tmp58a);
-  tmp67a = fmaT2(COS2, u[4], tmp67a);
-  u[0] = u[0] + u[4];
-
-  tmp211a = fmaT2(COS5, u[5], tmp211a);
-  tmp310a = fmaT2(COS1, u[5], tmp310a);
-  tmp49a = fmaT2(COS4, u[5], tmp49a);
-  tmp58a = fmaT2(COS2, u[5], tmp58a);
-  tmp67a = fmaT2(COS3, u[5], tmp67a);
-  u[0] = u[0] + u[5];
-
-  T2 tmp211b = fmaT2(SIN2_SIN1, u[9], u[10]);		// .910/.541
-  T2 tmp310b = fmaT2(SIN2_SIN1, u[10], -u[6]);
-  T2 tmp49b = fmaT2(SIN2_SIN1, -u[8], u[7]);
-  T2 tmp58b = fmaT2(SIN2_SIN1, -u[6], u[8]);
-  T2 tmp67b = fmaT2(SIN2_SIN1, -u[7], -u[9]);
-
-  tmp211b = fmaT2(SIN3_SIN1, u[8], tmp211b);		// .990/.541
-  tmp310b = fmaT2(SIN3_SIN1, -u[7], tmp310b);
-  tmp49b = fmaT2(SIN3_SIN1, u[10], tmp49b);
-  tmp58b = fmaT2(SIN3_SIN1, -u[9], tmp58b);
-  tmp67b = fmaT2(SIN3_SIN1, u[6], tmp67b);
-
-  tmp211b = fmaT2(SIN4_SIN1, u[7], tmp211b);		// .756/.541
-  tmp310b = fmaT2(SIN4_SIN1, u[9], tmp310b);
-  tmp49b = fmaT2(SIN4_SIN1, u[6], tmp49b);
-  tmp58b = fmaT2(SIN4_SIN1, u[10], tmp58b);
-  tmp67b = fmaT2(SIN4_SIN1, u[8], tmp67b);
-
-  tmp211b = fmaT2(SIN5_SIN1, u[6], tmp211b);		// .282/.541
-  tmp310b = fmaT2(SIN5_SIN1, -u[8], tmp310b);
-  tmp49b = fmaT2(SIN5_SIN1, -u[9], tmp49b);
-  tmp58b = fmaT2(SIN5_SIN1, u[7], tmp58b);
-  tmp67b = fmaT2(SIN5_SIN1, u[10], tmp67b);
-
-  fma_addsub(u[1], u[10], SIN1, tmp211a, tmp211b);
-  fma_addsub(u[2], u[9], SIN1, tmp310a, tmp310b);
-  fma_addsub(u[3], u[8], SIN1, tmp49a, tmp49b);
-  fma_addsub(u[4], u[7], SIN1, tmp58a, tmp58b);
-  fma_addsub(u[5], u[6], SIN1, tmp67a, tmp67b);
-}
-
-
-// See prime95's gwnum/zr12.mac file for more detailed explanation of the formulas below
-// R1 = (r1+r7)+(r4+r10)     +(((r3+r9)+(r5+r11))+((r2+r8)+(r6+r12)))
-// R7 = (r1+r7)-(r4+r10)     +(((r3+r9)+(r5+r11))-((r2+r8)+(r6+r12)))
-// R5 = (r1+r7)+(r4+r10) -.500(((r3+r9)+(r5+r11))+((r2+r8)+(r6+r12))) -.866(((i3+i9)-(i5+i11))-((i2+i8)-(i6+i12)))
-// R9 = (r1+r7)+(r4+r10) -.500(((r3+r9)+(r5+r11))+((r2+r8)+(r6+r12))) +.866(((i3+i9)-(i5+i11))-((i2+i8)-(i6+i12)))
-// R3 = (r1+r7)-(r4+r10) -.500(((r3+r9)+(r5+r11))-((r2+r8)+(r6+r12))) +.866(((i3+i9)-(i5+i11))+((i2+i8)-(i6+i12)))
-// R11= (r1+r7)-(r4+r10) -.500(((r3+r9)+(r5+r11))-((r2+r8)+(r6+r12))) -.866(((i3+i9)-(i5+i11))+((i2+i8)-(i6+i12)))
-// I1 = (i1+i7)+(i4+i10)     +(((i3+i9)+(i5+i11))+((i2+i8)+(i6+i12)))
-// I7 = (i1+i7)-(i4+i10)     +(((i3+i9)+(i5+i11))-((i2+i8)+(i6+i12)))
-// I5 = (i1+i7)+(i4+i10) -.500(((i3+i9)+(i5+i11))+((i2+i8)+(i6+i12))) +.866(((r3+r9)-(r5+r11))-((r2+r8)-(r6+r12)))
-// I9 = (i1+i7)+(i4+i10) -.500(((i3+i9)+(i5+i11))+((i2+i8)+(i6+i12))) -.866(((r3+r9)-(r5+r11))-((r2+r8)-(r6+r12)))
-// I3 = (i1+i7)-(i4+i10) -.500(((i3+i9)+(i5+i11))-((i2+i8)+(i6+i12))) -.866(((r3+r9)-(r5+r11))+((r2+r8)-(r6+r12)))
-// I11= (i1+i7)-(i4+i10) -.500(((i3+i9)+(i5+i11))-((i2+i8)+(i6+i12))) +.866(((r3+r9)-(r5+r11))+((r2+r8)-(r6+r12)))
-
-// R4 = (r1-r7)     -((r3-r9)-(r5-r11))				-(i4-i10)     +((i2-i8)+(i6-i12))
-// R10= (r1-r7)     -((r3-r9)-(r5-r11))				+(i4-i10)     -((i2-i8)+(i6-i12))
-// R2 = (r1-r7) +.500((r3-r9)-(r5-r11)) +.866((r2-r8)-(r6-r12))	+(i4-i10) +.500((i2-i8)+(i6-i12)) +.866((i3-i9)+(i5-i11))
-// R12= (r1-r7) +.500((r3-r9)-(r5-r11)) +.866((r2-r8)-(r6-r12))	-(i4-i10) -.500((i2-i8)+(i6-i12)) -.866((i3-i9)+(i5-i11))
-// R6 = (r1-r7) +.500((r3-r9)-(r5-r11)) -.866((r2-r8)-(r6-r12))	+(i4-i10) +.500((i2-i8)+(i6-i12)) -.866((i3-i9)+(i5-i11))
-// R8 = (r1-r7) +.500((r3-r9)-(r5-r11)) -.866((r2-r8)-(r6-r12))	-(i4-i10) -.500((i2-i8)+(i6-i12)) +.866((i3-i9)+(i5-i11))
-// I4 = (i1-i7)     -((i3-i9)-(i5-i11))                         +(r4-r10)     -((r2-r8)+(r6-r12))
-// I10= (i1-i7)     -((i3-i9)-(i5-i11))                         -(r4-r10)     +((r2-r8)+(r6-r12))
-// I2 = (i1-i7) +.500((i3-i9)-(i5-i11)) +.866((i2-i8)-(i6-i12))	-(r4-r10) -.500((r2-r8)+(r6-r12)) -.866((r3-r9)+(r5-r11))
-// I12= (i1-i7) +.500((i3-i9)-(i5-i11)) +.866((i2-i8)-(i6-i12))	+(r4-r10) +.500((r2-r8)+(r6-r12)) +.866((r3-r9)+(r5-r11))
-// I6 = (i1-i7) +.500((i3-i9)-(i5-i11)) -.866((i2-i8)-(i6-i12))	-(r4-r10) -.500((r2-r8)+(r6-r12)) +.866((r3-r9)+(r5-r11))
-// I8 = (i1-i7) +.500((i3-i9)-(i5-i11)) -.866((i2-i8)-(i6-i12))	+(r4-r10) +.500((r2-r8)+(r6-r12)) -.866((r3-r9)+(r5-r11))
-
-void fft12(T2 *u) {
-  const double SIN1 = 0x1.bb67ae8584caap-1;	// sin(tau/3), 0.86602540378443859659;
-  const double COS1 = 0.5;			// cos(tau/3)
-
-  X2(u[0], u[6]);				// (r1+ i1+),  (r1-  i1-)
-  X2_mul_t4(u[3], u[9]);			// (r4+ i4+),  (i4- -r4-)
-  X2_mul_t4(u[1], u[7]);			// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[5], u[11]);			// (r6+ i6+),  (i6- -r6-)
-  X2_mul_t4(u[2], u[8]);			// (r3+ i3+),  (i3- -r3-)
-  X2_mul_t4(u[4], u[10]);			// (r5+ i5+),  (i5- -r5-)
-
-  X2(u[0], u[3]);				// (r1++  i1++),  (r1+- i1+-)
-  X2_mul_t4(u[1], u[5]);			// (r2++  i2++),  (i2+- -r2+-)
-  X2_mul_t4(u[2], u[4]);			// (r3++  i3++),  (i3+- -r3+-)
-
-  X2_mul_t4(u[7], u[11]);			// (i2-+ -r2-+), (-r2-- -i2--)
-  X2_mul_t4(u[8], u[10]);			// (i3-+ -r3-+), (-r3-- -i3--)
-
-  X2(u[2], u[1]);				// (r3+++  i3+++),  (r3++- i3++-)
-  X2(u[4], u[5]);				// (i3+-+  -r3+-+), (i3+-- -r3+--)
-
-  T2 tmp26812b = fmaT2(COS1, u[7], u[9]);
-  T2 tmp410b = u[9] - u[7];
-
-  T2 tmp26812a = fmaT2(-COS1, u[10], u[6]);
-  T2 tmp410a = u[6] + u[10];
-
-  T2 tmp68a, tmp68b, tmp212a, tmp212b;
-  fma_addsub(tmp212b, tmp68b, SIN1, tmp26812b, u[8]);
-  fma_addsub(tmp68a, tmp212a, SIN1, tmp26812a, u[11]);
-
-  T2 tmp311 = fmaT2(-COS1, u[1], u[3]);
-  u[6] = u[3] + u[1];
-
-  T2 tmp59 = fmaT2(-COS1, u[2], u[0]);
-  u[0] = u[0] + u[2];
-
-  u[3] = tmp410a - tmp410b;
-  u[9] = tmp410a + tmp410b;
-  u[1] = tmp212a + tmp212b;
-  u[11] = tmp212a - tmp212b;
-
-  fma_addsub(u[2], u[10], SIN1, tmp311, u[4]);
-  fma_addsub(u[8], u[4], SIN1, tmp59, u[5]);
-
-  u[5] = tmp68a + tmp68b;
-  u[7] = tmp68a - tmp68b;
-}
-
-// To calculate a 13-complex FFT in a brute force way (using a shorthand notation):
-// The sin/cos values (w = 13th root of unity) are:
-// w^1 = .885 - .465i
-// w^2 = .568 - .823i
-// w^3 = .121 - .993i
-// w^4 = -.355 - .935i
-// w^5 = -.749 - .663i
-// w^6 = -.971 - .239i
-// w^7 = -.971 + .239i
-// w^8 = -.749 + .663i
-// w^9 = -.355 + .935i
-// w^10= .121 + .993i
-// w^11= .568 + .823i
-// w^12= .885 + .465i
-//
-// R1 = r1     +(r2+r13)     +(r3+r12)     +(r4+r11)     +(r5+r10)     +(r6+r9)     +(r7+r8)
-// R2 = r1 +.885(r2+r13) +.568(r3+r12) +.121(r4+r11) -.355(r5+r10) -.749(r6+r9) -.971(r7+r8)  +.465(i2-i13) +.823(i3-i12) +.993(i4-i11) +.935(i5-i10) +.663(i6-i9) +.239(i7-i8)
-// R13= r1 +.885(r2+r13) +.568(r3+r12) +.121(r4+r11) -.355(r5+r10) -.749(r6+r9) -.971(r7+r8)  -.465(i2-i13) -.823(i3-i12) -.993(i4-i11) -.935(i5-i10) -.663(i6-i9) -.239(i7-i8)
-// R3 = r1 +.568(r2+r13) -.355(r3+r12) -.971(r4+r11) -.749(r5+r10) +.121(r6+r9) +.885(r7+r8)  +.823(i2-i13) +.935(i3-i12) +.239(i4-i11) -.663(i5-i10) -.993(i6-i9) -.465(i7-i8)
-// R12= r1 +.568(r2+r13) -.355(r3+r12) -.971(r4+r11) -.749(r5+r10) +.121(r6+r9) +.885(r7+r8)  -.823(i2-i13) -.935(i3-i12) -.239(i4-i11) +.663(i5-i10) +.993(i6-i9) +.465(i7-i8)
-// R4 = r1 +.121(r2+r13) -.971(r3+r12) -.355(r4+r11) +.885(r5+r10) +.568(r6+r9) -.749(r7+r8)  +.993(i2-i13) +.239(i3-i12) -.935(i4-i11) -.465(i5-i10) +.823(i6-i9) +.663(i7-i8)
-// R11= r1 +.121(r2+r13) -.971(r3+r12) -.355(r4+r11) +.885(r5+r10) +.568(r6+r9) -.749(r7+r8)  -.993(i2-i13) -.239(i3-i12) +.935(i4-i11) +.465(i5-i10) -.823(i6-i9) -.663(i7-i8)
-// R5 = r1 -.355(r2+r13) -.749(r3+r12) +.885(r4+r11) +.121(r5+r10) -.971(r6+r9) +.568(r7+r8)  +.935(i2-i13) -.663(i3-i12) -.465(i4-i11) +.993(i5-i10) -.239(i6-i9) -.823(i7-i8)
-// R10= r1 -.355(r2+r13) -.749(r3+r12) +.885(r4+r11) +.121(r5+r10) -.971(r6+r9) +.568(r7+r8)  -.935(i2-i13) +.663(i3-i12) +.465(i4-i11) -.993(i5-i10) +.239(i6-i9) +.823(i7-i8)
-// R6 = r1 -.749(r2+r13) +.121(r3+r12) +.568(r4+r11) -.971(r5+r10) +.885(r6+r9) -.355(r7+r8)  +.663(i2-i13) -.993(i3-i12) +.823(i4-i11) -.239(i5-i10) -.465(i6-i9) +.935(i7-i8)
-// R9 = r1 -.749(r2+r13) +.121(r3+r12) +.568(r4+r11) -.971(r5+r10) +.885(r6+r9) -.355(r7+r8)  -.663(i2-i13) +.993(i3-i12) -.823(i4-i11) +.239(i5-i10) +.465(i6-i9) -.935(i7-i8)
-// R7 = r1 -.971(r2+r13) +.885(r3+r12) -.749(r4+r11) +.568(r5+r10) -.355(r6+r9) +.121(r7+r8)  +.239(i2-i13) -.465(i3-i12) +.663(i4-i11) -.823(i5-i10) +.935(i6-i9) -.993(i7-i8)
-// R8 = r1 -.971(r2+r13) +.885(r3+r12) -.749(r4+r11) +.568(r5+r10) -.355(r6+r9) +.121(r7+r8)  -.239(i2-i13) +.465(i3-i12) -.663(i4-i11) +.823(i5-i10) -.935(i6-i9) +.993(i7-i8)
-//
-// I1 = i1                                                                                        +(i2+i13)     +(i3+i12)     +(i4+i11)     +(i5+i10)     +(i6+i9)     +(i7+i8)
-// I2 = i1 -.465(r2-r13) -.823(r3-r12) -.993(r4-r11) -.935(r5-r10) -.663(r6-r9) -.239(r7-r8)  +.885(i2+i13) +.568(i3+i12) +.121(i4+i11) -.355(i5+i10) -.749(i6+i9) -.971(i7+i8)
-// I13= i1 +.465(r2-r13) +.823(r3-r12) +.993(r4-r11) +.935(r5-r10) +.663(r6-r9) +.239(r7-r8)  +.885(i2+i13) +.568(i3+i12) +.121(i4+i11) -.355(i5+i10) -.749(i6+i9) -.971(i7+i8)
-// I3 = i1 -.823(r2-r13) -.935(r3-r12) -.239(r4-r11) +.663(r5-r10) +.993(r6-r9) +.465(r7-r8)  +.568(i2+i13) -.355(i3+i12) -.971(i4+i11) -.749(i5+i10) +.121(i6+i9) +.885(i7+i8)
-// I12= i1 +.823(r2-r13) +.935(r3-r12) +.239(r4-r11) -.663(r5-r10) -.993(r6-r9) -.465(r7-r8)  +.568(i2+i13) -.355(i3+i12) -.971(i4+i11) -.749(i5+i10) +.121(i6+i9) +.885(i7+i8)
-// I4 = i1 -.993(r2-r13) -.239(r3-r12) +.935(r4-r11) +.465(r5-r10) -.823(r6-r9) -.663(r7-r8)  +.121(i2+i13) -.971(i3+i12) -.355(i4+i11) +.885(i5+i10) +.568(i6+i9) -.749(i7+i8)
-// I11= i1 +.993(r2-r13) +.239(r3-r12) -.935(r4-r11) -.465(r5-r10) +.823(r6-r9) +.663(r7-r8)  +.121(i2+i13) -.971(i3+i12) -.355(i4+i11) +.885(i5+i10) +.568(i6+i9) -.749(i7+i8)
-// I5 = i1 -.935(r2-r13) +.663(r3-r12) +.465(r4-r11) -.993(r5-r10) +.239(r6-r9) +.823(r7-r8)  -.355(i2+i13) -.749(i3+i12) +.885(i4+i11) +.121(i5+i10) -.971(i6+i9) +.568(i7+i8)
-// I10= i1 +.935(r2-r13) -.663(r3-r12) -.465(r4-r11) +.993(r5-r10) -.239(r6-r9) -.823(r7-r8)  -.355(i2+i13) -.749(i3+i12) +.885(i4+i11) +.121(i5+i10) -.971(i6+i9) +.568(i7+i8)
-// I6 = i1 -.663(r2-r13) +.993(r3-r12) -.823(r4-r11) +.239(r5-r10) +.465(r6-r9) -.993(r7-r8)  -.749(i2+i13) +.121(i3+i12) +.568(i4+i11) -.971(i5+i10) +.885(i6+i9) -.355(i7+i8)
-// I9 = i1 +.663(r2-r13) -.993(r3-r12) +.823(r4-r11) -.239(r5-r10) -.465(r6-r9) +.993(r7-r8)  -.749(i2+i13) +.121(i3+i12) +.568(i4+i11) -.971(i5+i10) +.885(i6+i9) -.355(i7+i8)
-// I7 = i1 -.239(r2-r13) +.465(r3-r12) -.663(r4-r11) +.823(r5-r10) -.935(r6-r9) +.935(r7-r8)  -.971(i2+i13) +.885(i3+i12) -.749(i4+i11) +.568(i5+i10) -.355(i6+i9) +.121(i7+i8)
-// I8 = i1 +.239(r2-r13) -.465(r3-r12) +.663(r4-r11) -.823(r5-r10) +.935(r6-r9) -.935(r7-r8)  -.971(i2+i13) +.885(i3+i12) -.749(i4+i11) +.568(i5+i10) -.355(i6+i9) +.121(i7+i8)
-
-void fft13(T2 *u) {
-  const double COS1 = 0.8854560256532098959003755220151;	// cos(tau/13)
-  const double COS2 = 0.56806474673115580251180755912752;	// cos(2*tau/13)
-  const double COS3 = 0.12053668025532305334906768745254;	// cos(3*tau/13)
-  const double COS4 = -0.35460488704253562596963789260002;	// cos(4*tau/13)
-  const double COS5 = -0.74851074817110109863463059970135;	// cos(5*tau/13)
-  const double COS6 = -0.97094181742605202715698227629379;	// cos(6*tau/13)
-  const double SIN1 = 0.4647231720437685456560153351331;	// sin(tau/13)
-  const double SIN2_SIN1 = 1.7709120513064197918007510440302;	// sin(2*tau/13) / sin(tau/13) = .823/.465
-  const double SIN3_SIN1 = 2.136129493462311605023615118255;	// sin(3*tau/13) / sin(tau/13) = .993/.465
-  const double SIN4_SIN1 = 2.0119854118170658984988864189353;	// sin(4*tau/13) / sin(tau/13) = .935/.465
-  const double SIN5_SIN1 = 1.426919719377240353084339333055;	// sin(5*tau/13) / sin(tau/13) = .663/.465
-  const double SIN6_SIN1 = 0.51496391547486370122962521953258;	// sin(6*tau/13) / sin(tau/13) = .239/.465
-
-  X2_mul_t4(u[1], u[12]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[11]);				// (r3+ i3+),  (i3- -r3-)
-  X2_mul_t4(u[3], u[10]);				// (r4+ i4+),  (i4- -r4-)
-  X2_mul_t4(u[4], u[9]);				// (r5+ i5+),  (i5- -r5-)
-  X2_mul_t4(u[5], u[8]);				// (r6+ i6+),  (i6- -r6-)
-  X2_mul_t4(u[6], u[7]);				// (r7+ i7+),  (i7- -r7-)
-
-  T2 tmp213a = fmaT2(COS1, u[1], u[0]);
-  T2 tmp312a = fmaT2(COS2, u[1], u[0]);
-  T2 tmp411a = fmaT2(COS3, u[1], u[0]);
-  T2 tmp510a = fmaT2(COS4, u[1], u[0]);
-  T2 tmp69a = fmaT2(COS5, u[1], u[0]);
-  T2 tmp78a = fmaT2(COS6, u[1], u[0]);
-  u[0] = u[0] + u[1];
-
-  tmp213a = fmaT2(COS2, u[2], tmp213a);
-  tmp312a = fmaT2(COS4, u[2], tmp312a);
-  tmp411a = fmaT2(COS6, u[2], tmp411a);
-  tmp510a = fmaT2(COS5, u[2], tmp510a);
-  tmp69a = fmaT2(COS3, u[2], tmp69a);
-  tmp78a = fmaT2(COS1, u[2], tmp78a);
-  u[0] = u[0] + u[2];
-
-  tmp213a = fmaT2(COS3, u[3], tmp213a);
-  tmp312a = fmaT2(COS6, u[3], tmp312a);
-  tmp411a = fmaT2(COS4, u[3], tmp411a);
-  tmp510a = fmaT2(COS1, u[3], tmp510a);
-  tmp69a = fmaT2(COS2, u[3], tmp69a);
-  tmp78a = fmaT2(COS5, u[3], tmp78a);
-  u[0] = u[0] + u[3];
-
-  tmp213a = fmaT2(COS4, u[4], tmp213a);
-  tmp312a = fmaT2(COS5, u[4], tmp312a);
-  tmp411a = fmaT2(COS1, u[4], tmp411a);
-  tmp510a = fmaT2(COS3, u[4], tmp510a);
-  tmp69a = fmaT2(COS6, u[4], tmp69a);
-  tmp78a = fmaT2(COS2, u[4], tmp78a);
-  u[0] = u[0] + u[4];
-
-  tmp213a = fmaT2(COS5, u[5], tmp213a);
-  tmp312a = fmaT2(COS3, u[5], tmp312a);
-  tmp411a = fmaT2(COS2, u[5], tmp411a);
-  tmp510a = fmaT2(COS6, u[5], tmp510a);
-  tmp69a = fmaT2(COS1, u[5], tmp69a);
-  tmp78a = fmaT2(COS4, u[5], tmp78a);
-  u[0] = u[0] + u[5];
-
-  tmp213a = fmaT2(COS6, u[6], tmp213a);
-  tmp312a = fmaT2(COS1, u[6], tmp312a);
-  tmp411a = fmaT2(COS5, u[6], tmp411a);
-  tmp510a = fmaT2(COS2, u[6], tmp510a);
-  tmp69a = fmaT2(COS4, u[6], tmp69a);
-  tmp78a = fmaT2(COS3, u[6], tmp78a);
-  u[0] = u[0] + u[6];
-
-  T2 tmp213b = fmaT2(SIN2_SIN1, u[11], u[12]);		// .823/.465
-  T2 tmp312b = fmaT2(SIN2_SIN1, u[12], -u[7]);
-  T2 tmp411b = fmaT2(SIN2_SIN1, u[8], -u[9]);
-  T2 tmp510b = fmaT2(SIN2_SIN1, -u[7], -u[10]);
-  T2 tmp69b = fmaT2(SIN2_SIN1, u[10], -u[8]);
-  T2 tmp78b = fmaT2(SIN2_SIN1, -u[9], -u[11]);
-
-  tmp213b = fmaT2(SIN3_SIN1, u[10], tmp213b);		// .993/.465
-  tmp312b = fmaT2(SIN3_SIN1, -u[8], tmp312b);
-  tmp411b = fmaT2(SIN3_SIN1, u[12], tmp411b);
-  tmp510b = fmaT2(SIN3_SIN1, u[9], tmp510b);
-  tmp69b = fmaT2(SIN3_SIN1, -u[11], tmp69b);
-  tmp78b = fmaT2(SIN3_SIN1, -u[7], tmp78b);
-
-  tmp213b = fmaT2(SIN4_SIN1, u[9], tmp213b);		// .935/.465
-  tmp312b = fmaT2(SIN4_SIN1, u[11], tmp312b);
-  tmp411b = fmaT2(SIN4_SIN1, -u[10], tmp411b);
-  tmp510b = fmaT2(SIN4_SIN1, u[12], tmp510b);
-  tmp69b = fmaT2(SIN4_SIN1, u[7], tmp69b);
-  tmp78b = fmaT2(SIN4_SIN1, u[8], tmp78b);
-
-  tmp213b = fmaT2(SIN5_SIN1, u[8], tmp213b);		// .663/.465
-  tmp312b = fmaT2(SIN5_SIN1, -u[9], tmp312b);
-  tmp411b = fmaT2(SIN5_SIN1, u[7], tmp411b);
-  tmp510b = fmaT2(SIN5_SIN1, -u[11], tmp510b);
-  tmp69b = fmaT2(SIN5_SIN1, u[12], tmp69b);
-  tmp78b = fmaT2(SIN5_SIN1, u[10], tmp78b);
-
-  tmp213b = fmaT2(SIN6_SIN1, u[7], tmp213b);		// .239/.465
-  tmp312b = fmaT2(SIN6_SIN1, u[10], tmp312b);
-  tmp411b = fmaT2(SIN6_SIN1, u[11], tmp411b);
-  tmp510b = fmaT2(SIN6_SIN1, -u[8], tmp510b);
-  tmp69b = fmaT2(SIN6_SIN1, -u[9], tmp69b);
-  tmp78b = fmaT2(SIN6_SIN1, u[12], tmp78b);
-
-  fma_addsub(u[1], u[12], SIN1, tmp213a, tmp213b);
-  fma_addsub(u[2], u[11], SIN1, tmp312a, tmp312b);
-  fma_addsub(u[3], u[10], SIN1, tmp411a, tmp411b);
-  fma_addsub(u[4], u[9], SIN1, tmp510a, tmp510b);
-  fma_addsub(u[5], u[8], SIN1, tmp69a, tmp69b);
-  fma_addsub(u[6], u[7], SIN1, tmp78a, tmp78b);
-}
-
-
-void fft14(T2 *u) {
-  const double SIN1 = 0.781831482468029809;		// sin(tau/7)
-  const double SIN2_SIN1 = 1.2469796037174670611;	// sin(2*tau/7) / sin(tau/7) = .975/.782
-  const double SIN3_SIN1 = 0.5549581320873711914;	// sin(3*tau/7) / sin(tau/7) = .434/.782
-  const double COS1 = 0.6234898018587335305;		// cos(tau/7)
-  const double COS2 = -0.2225209339563144043;		// cos(2*tau/7)
-  const double COS3 = -0.9009688679024191262;		// cos(3*tau/7)
-
-  X2(u[0], u[7]);					// (r1+ i1+),  (r1-  i1-)
-  X2_mul_t4(u[1], u[8]);				// (r2+ i2+),  (i2- -r2-)
-  X2_mul_t4(u[2], u[9]);				// (r3+ i3+),  (i3- -r3-)
-  X2_mul_t4(u[3], u[10]);				// (r4+ i4+),  (i4- -r4-)
-  X2_mul_t4(u[4], u[11]);				// (r5+ i5+),  (i5- -r5-)
-  X2_mul_t4(u[5], u[12]);				// (r6+ i6+),  (i6- -r6-)
-  X2_mul_t4(u[6], u[13]);				// (r7+ i7+),  (i7- -r7-)
-
-  X2_mul_t4(u[1], u[6]);				// (r2++  i2++),  (i2+- -r2+-)
-  X2_mul_t4(u[2], u[5]);				// (r3++  i3++),  (i3+- -r3+-)
-  X2_mul_t4(u[3], u[4]);				// (r4++  i4++),  (i4+- -r4+-)
-  X2_mul_t4(u[8], u[13]);				// (i2-+ -r2-+), (-r2-- -i2--)
-  X2_mul_t4(u[9], u[12]);				// (i3-+ -r3-+), (-r3-- -i3--)
-  X2_mul_t4(u[10], u[11]);				// (i4-+ -r4-+), (-r4-- -i4--)
-
-  T2 tmp313a = fmaT2(COS1, u[1], u[0]);
-  T2 tmp511a = fmaT2(COS2, u[1], u[0]);
-  T2 tmp79a = fmaT2(COS3, u[1], u[0]);
-  u[0] = u[0] + u[1];
-  T2 tmp214a = fmaT2(COS3, u[13], u[7]);
-  T2 tmp412a = fmaT2(COS2, u[13], u[7]);
-  T2 tmp610a = fmaT2(COS1, u[13], u[7]);
-  u[7] = u[7] + u[13];
-
-  tmp313a = fmaT2(COS2, u[2], tmp313a);
-  tmp511a = fmaT2(COS3, u[2], tmp511a);
-  tmp79a = fmaT2(COS1, u[2], tmp79a);
-  u[0] = u[0] + u[2];
-  tmp214a = fmaT2(COS1, -u[12], tmp214a);
-  tmp412a = fmaT2(COS3, -u[12], tmp412a);
-  tmp610a = fmaT2(COS2, -u[12], tmp610a);
-  u[7] = u[7] - u[12];
-
-  tmp313a = fmaT2(COS3, u[3], tmp313a);
-  tmp511a = fmaT2(COS1, u[3], tmp511a);
-  tmp79a = fmaT2(COS2, u[3], tmp79a);
-  u[0] = u[0] + u[3];
-  tmp214a = fmaT2(COS2, u[11], tmp214a);
-  tmp412a = fmaT2(COS1, u[11], tmp412a);
-  tmp610a = fmaT2(COS3, u[11], tmp610a);
-  u[7] = u[7] + u[11];
-
-  T2 tmp313b = fmaT2(SIN2_SIN1, u[5], u[6]);			// Apply .975/.782
-  T2 tmp511b = fmaT2(SIN2_SIN1, u[6], -u[4]);
-  T2 tmp79b = fmaT2(SIN2_SIN1, u[4], -u[5]);
-  T2 tmp214b = fmaT2(SIN2_SIN1, u[10], u[9]);
-  T2 tmp412b = fmaT2(SIN2_SIN1, u[8], -u[10]);
-  T2 tmp610b = fmaT2(SIN2_SIN1, -u[9], u[8]);
-
-  tmp313b = fmaT2(SIN3_SIN1, u[4], tmp313b);			// Apply .434/.782
-  tmp511b = fmaT2(SIN3_SIN1, -u[5], tmp511b);
-  tmp79b = fmaT2(SIN3_SIN1, u[6], tmp79b);
-  tmp214b = fmaT2(SIN3_SIN1, u[8], tmp214b);
-  tmp412b = fmaT2(SIN3_SIN1, u[9], tmp412b);
-  tmp610b = fmaT2(SIN3_SIN1, u[10], tmp610b);
-
-  fma_addsub(u[1], u[13], SIN1, tmp214a, tmp214b);
-  fma_addsub(u[2], u[12], SIN1, tmp313a, tmp313b);
-  fma_addsub(u[3], u[11], SIN1, tmp412a, tmp412b);
-  fma_addsub(u[4], u[10], SIN1, tmp511a, tmp511b);
-  fma_addsub(u[5], u[9], SIN1, tmp610a, tmp610b);
-  fma_addsub(u[6], u[8], SIN1, tmp79a, tmp79b);
-}
-
-
-
-// 5 complex FFT where second though fifth inputs need to be multiplied by SIN1, and third input needs to multiplied by SIN2
-void fft5delayedSIN1234(T2 *u) {
-  const double SIN4_SIN1 = 2.44512490403509663921;		// sin(4*tau/15) / sin(tau/15) = .985/.643
-  const double SIN3_SIN2 = 1.27977277603217842055;		// sin(3*tau/15) / sin(2*tau/15) = .985/.643
-  const double COS1SIN1 = 0.12568853494543955095;		// cos(tau/5) * sin(tau/15) = .309 * .407
-  const double COS1SIN2 = 0.2296443803543192195;		// cos(tau/5) * sin(2*tau/15) = .309 * .743
-  const double COS2SIN1 = -0.32905685648333965483;		// cos(2*tau/5) * sin(tau/15) = -.809 * .407
-  const double COS2SIN2 = -0.60121679309301633701;		// cos(2*tau/5) * sin(2*tau/15) = -.809 * .743
-  const double SIN1 = 0.40673664307580020775;			// sin(tau/15) = .407
-  const double SIN2 = 0.74314482547739423501;			// sin(2*tau/15) = .743
-  const double SIN2_SIN1SIN1_SIN2 = 0.33826121271771642765;	// sin(2*tau/5) / sin(tau/5) * sin(tau/15) / sin(2*tau/15) = .588/.951 * .407/.743
-  const double SIN2_SIN1SIN2_SIN1 = 1.12920428618240948485;	// sin(2*tau/5) / sin(tau/5) * sin(2*tau/15) / sin(tau/15) = .588/.951 * .743/.407
-  const double SIN1SIN1 = 0.38682953481325584261;		// sin(tau/5) * sin(tau/15) = .951 * .407
-  const double SIN1SIN2 = 0.70677272882130044775;		// sin(tau/5) * sin(2*tau/15) = .951 * .743
-
-  fma_addsub_mul_t4(u[1], u[4], SIN4_SIN1, u[1], u[4]);		// (r2+ i2+),  (i2- -r2-)		we owe results a mul by SIN1
-  fma_addsub_mul_t4(u[2], u[3], SIN3_SIN2, u[2], u[3]);		// (r3+ i3+),  (i3- -r3-)		we owe results a mul by SIN2
-
-  T2 tmp25a = fmaT2(COS1SIN1, u[1], u[0]);
-  T2 tmp34a = fmaT2(COS2SIN1, u[1], u[0]);
-  u[0] = u[0] + SIN1 * u[1];
-
-  tmp25a = fmaT2(COS2SIN2, u[2], tmp25a);
-  tmp34a = fmaT2(COS1SIN2, u[2], tmp34a);
-  u[0] = u[0] + SIN2 * u[2];
-
-  T2 tmp25b = fmaT2(SIN2_SIN1SIN2_SIN1, u[3], u[4]);		// (i2- +.588/.951*i3-, -r2- -.588/.951*r3-)	we owe results a mul by .951*SIN1
-  T2 tmp34b = fmaT2(SIN2_SIN1SIN1_SIN2, u[4], -u[3]);		// (.588/.951*i2- -i3-, -.588/.951*r2- +r3-)	we owe results a mul by .951*SIN2
-
-  fma_addsub(u[1], u[4], SIN1SIN1, tmp25a, tmp25b);
-  fma_addsub(u[2], u[3], SIN1SIN2, tmp34a, tmp34b);
-}
-
-// This version is faster (fewer F64 ops), but slightly less accurate
-void fft15(T2 *u) {
-  const double COS1_SIN1 = 2.24603677390421605416;	// cos(tau/15) / sin(tau/15) = .766/.643
-  const double COS2_SIN2 = 0.90040404429783994512;	// cos(2*tau/15) / sin(2*tau/15) = .174/.985
-  const double COS3_SIN3 = 0.32491969623290632616;	// cos(3*tau/15) / sin(3*tau/15) = .174/.985
-  const double COS4_SIN4 = -0.10510423526567646251;	// cos(4*tau/15) / sin(4*tau/15) = .174/.985
-
-  fft3by(u, 5);
-  fft3by(u+1, 5);
-  fft3by(u+2, 5);
-  fft3by(u+3, 5);
-  fft3by(u+4, 5);
-
-  u[6] = partial_cmul(u[6], COS1_SIN1);			// mul by w^1, we owe result a mul by SIN1
-  u[11] = partial_cmul_conjugate(u[11], COS1_SIN1);	// mul by w^-1, we owe result a mul by SIN1
-  u[7] = partial_cmul(u[7], COS2_SIN2);			// mul by w^2, we owe result a mul by SIN2
-  u[12] = partial_cmul_conjugate(u[12], COS2_SIN2);	// mul by w^-2, we owe result a mul by SIN2
-  u[8] = partial_cmul(u[8], COS3_SIN3);			// mul by w^3, we owe result a mul by SIN3
-  u[13] = partial_cmul_conjugate(u[13], COS3_SIN3);	// mul by w^-3, we owe result a mul by SIN3
-  u[9] = partial_cmul(u[9], COS4_SIN4);			// mul by w^4, we owe result a mul by SIN4
-  u[14] = partial_cmul_conjugate(u[14], COS4_SIN4);	// mul by w^-4, we owe result a mul by SIN4
-
-  fft5(u);
-  fft5delayedSIN1234(u+5);
-  fft5delayedSIN1234(u+10);
-
-  // fix order [0, 3, 6, 9, 12, 1, 4, 7, 10, 13, 14, 2, 5, 8, 11]
-
-  T2 tmp = u[1];
-  u[1] = u[5];
-  u[5] = u[12];
-  u[12] = u[4];
-  u[4] = u[6];
-  u[6] = u[2];
-  u[2] = u[11];
-  u[11] = u[14];
-  u[14] = u[10];
-  u[10] = u[8];
-  u[8] = u[13];
-  u[13] = u[9];
-  u[9] = u[3];
-  u[3] = tmp;
-}
+#include "fft7.cl"
+#include "fft9.cl"
+#include "fft10.cl"
+#include "fft11.cl"
+#include "fft12.cl"
+#include "fft13.cl"
+#include "fft14.cl"
+#include "fft15.cl"
 
 void shufl(u32 WG, local T2 *lds2, T2 *u, u32 n, u32 f) {
   u32 me = get_local_id(0);
@@ -2035,7 +818,6 @@ void readDelta(u32 WG, u32 N, T2 *u, const global T2 *a, const global T2 *b, u32
 #elif MIDDLE == 7 || MIDDLE == 14
 
 #define SIN_COEFS {0.0030120734933746819,-4.5545496673734544e-09,2.066077343547647e-15,-4.4630156850662332e-22,5.6237622654854882e-29,-4.6381134477150518e-36,2.6699656391050201e-43, 149 * 7}
-
 #define COS_COEFS {-4.5362933647451799e-06,3.4296595818385068e-12,-1.0371961336265129e-18,1.6803664055570525e-25,-1.6939185081650983e-32,1.1641940392856976e-39,-5.7443786570712859e-47, 149 * 7}
 
 #elif MIDDLE == 9
@@ -2109,14 +891,6 @@ double2 reducedCosSin(u32 k, u32 N) {
   return U2(kcospi(k, N/2), -ksinpi(k, N/2));
 }
 
-#if SP
-
-global float4 SP_TRIG_2SH[2 * SMALL_HEIGHT / 8 + 1];
-global float4 SP_TRIG_BH[BIG_HEIGHT / 8 + 1];
-global float4 SP_TRIG_N[ND / 8 + 1];
-
-#endif
-
 global double2 TRIG_2SH[SMALL_HEIGHT / 4 + 1];
 global double2 TRIG_BH[BIG_HEIGHT / 8 + 1];
 
@@ -2181,18 +955,6 @@ float fastSinSP(u32 k, u32 tau, u32 M) {
   // return sinpi(2 * x);
 }
 
-float fasterSinSP(u32 k, u32 tau, u32 M) {
-#if HAS_ASM
-  float x = (-1.0f / tau) * k;  
-  float out;
-  //v_sin_f32 has 10upls error on [0, pi/4] (R7)
-  __asm("v_sin_f32_e32 %0, %1" : "=v"(out) : "v" (x));
-  return out;  
-#else
-  return fastSinSP(k, tau, M);
-#endif
-}
-
 float fastCosSP(u32 k, u32 tau) {
   float x = (-1.0f / tau) * k;
   
@@ -2213,12 +975,6 @@ KERNEL(64) writeGlobals(global double2* trig2ShDP, global double2* trigBhDP, glo
                         global double2* trigW,
                         global double2* threadWeights, global double2* carryWeights
                         ) {
-#if SP
-  for (u32 k = get_global_id(0); k < 2 * SMALL_HEIGHT/8 + 1; k += get_global_size(0)) { SP_TRIG_2SH[k] = trig2ShSP[k]; }
-  for (u32 k = get_global_id(0); k < BIG_HEIGHT/8 + 1; k += get_global_size(0)) { SP_TRIG_BH[k] = trigBhSP[k]; }
-  for (u32 k = get_global_id(0); k < ND/8 + 1; k += get_global_size(0)) { SP_TRIG_N[k] = trigNSP[k]; }
-#endif
-
   for (u32 k = get_global_id(0); k < 2 * SMALL_HEIGHT/8 + 1; k += get_global_size(0)) { TRIG_2SH[k] = trig2ShDP[k]; }
   for (u32 k = get_global_id(0); k < BIG_HEIGHT/8 + 1; k += get_global_size(0)) { TRIG_BH[k] = trigBhDP[k]; }
 
@@ -2461,17 +1217,6 @@ KERNEL(G_H) fftHout(P(T2) io, Trig smallTrig) {
 
 T fweightStep(u32 i) {
   const T TWO_TO_NTH[8] = {
-#if SP
-    // 2^(k/8) for k in [0..8)
-    (1,0,0),
-    (1.09050775,-1.30775399e-08,-2.52512433e-16),
-    (1.18920708,3.79763527e-08,1.15004321e-15),
-    (1.29683959,-4.01899953e-08,1.57969474e-15),
-    (1.41421354,2.4203235e-08,-7.62806744e-16),
-    (1.54221082,8.07090483e-09,-1.42546261e-16),
-    (1.68179286,-2.47553267e-08,-5.84143725e-16),
-    (1.8340081,-1.1239278e-08,-1.89213528e-16),
-#else
     // 2^(k/8) -1 for k in [0..8)
     0,
     0.090507732665257662,
@@ -2481,24 +1226,12 @@ T fweightStep(u32 i) {
     0.54221082540794086,
     0.68179283050742912,
     0.83400808640934243,
-#endif
   };
   return TWO_TO_NTH[i * STEP % NW * (8 / NW)];
 }
 
 T iweightStep(u32 i) {
   const T TWO_TO_MINUS_NTH[8] = {
-#if SP
-    // 2^-(k/8) for k in [0..8)
-    (1,0,0),
-    (0.917004049,-5.61963898e-09,-9.46067642e-17),
-    (0.840896428,-1.23776633e-08,-2.92071863e-16),
-    (0.771105409,4.03545242e-09,-7.12731307e-17),
-    (0.707106769,1.21016175e-08,-3.81403372e-16),
-    (0.648419797,-2.00949977e-08,7.89847371e-16),
-    (0.594603539,1.89881764e-08,5.75021604e-16),
-    (0.545253873,-6.53876997e-09,-1.26256216e-16)
-#else
     // 2^-(k/8) - 1 for k in [0..8)
     0,
     -0.082995956795328771,
@@ -2508,7 +1241,6 @@ T iweightStep(u32 i) {
     -0.35158022267449518,
     -0.40539644249863949,
     -0.45474613366737116,
-#endif
   };
   return TWO_TO_MINUS_NTH[i * STEP % NW * (8 / NW)];
 }
@@ -2568,7 +1300,7 @@ void fft_MIDDLE(T2 *u) {
 #elif MIDDLE == 7
   fft7(u);
 #elif MIDDLE == 8
-  fft8mid(u);
+  fft8(u);
 #elif MIDDLE == 9
   fft9(u);
 #elif MIDDLE == 10
@@ -2775,7 +1507,7 @@ void middleShuffle(local T *lds, T2 *u, u32 workgroupSize, u32 blockSize) {
 }
 
 
-KERNEL(IN_WG) fftMiddleIn(P(T2) out, volatile CP(T2) in, Trig trig) {
+KERNEL(IN_WG) fftMiddleIn(P(T2) out, CP(T2) in, Trig trig) {
   T2 u[MIDDLE];
   
   u32 SIZEY = IN_WG / IN_SIZEX;
@@ -2851,18 +1583,6 @@ KERNEL(OUT_WG) fftMiddleOut(P(T2) out, P(T2) in, Trig trig) {
   // Finally, roundoff errors are sometimes improved if we use the next lower double precision
   // number.  This may be due to roundoff errors introduced by applying inexact TWO_TO_N_8TH weights.
   double factor = 1.0 / (4 * 4 * NWORDS);
-
-#if 0
-#if MAX_ACCURACY && (MIDDLE == 4 || MIDDLE == 5 || MIDDLE == 10 || MIDDLE == 11 || MIDDLE == 13)
-  long tmp = as_long(factor);
-  tmp--;
-  factor = as_double(tmp);
-#elif MAX_ACCURACY && MIDDLE == 8
-  long tmp = as_long(factor);
-  tmp -= 2;
-  factor = as_double(tmp);
-#endif
-#endif
 
   middleMul2(u, starty + my, startx + mx, factor);
   local T lds[OUT_WG / 2 * (MIDDLE <= 8 ? 2 * MIDDLE : MIDDLE)];
@@ -2940,9 +1660,9 @@ KERNEL(G_W) NAME(P(Word2) out, CP(T2) in, P(CarryABM) carryOut, CP(u32) bits, P(
 #endif
     
 #if DO_MUL3
-    out[p] = carryPairMul(x, &carry, test(b, 2 * i), test(b, 2 * i + 1), carry, &carryMax, MUST_BE_EXACT);
+    out[p] = carryPairMul(x, &carry, test(b, 2 * i), test(b, 2 * i + 1), carry, &carryMax);
 #else
-    out[p] = carryPair(x, &carry, test(b, 2 * i), test(b, 2 * i + 1), carry, &carryMax, MUST_BE_EXACT);
+    out[p] = carryPair(x, &carry, test(b, 2 * i), test(b, 2 * i + 1), carry, &carryMax);
 #endif
   }
   carryOut[G_W * g + me] = carry;
@@ -3046,9 +1766,9 @@ KERNEL(G_W) NAME(P(T2) out, CP(T2) in, P(i64) carryShuttle, P(u32) ready, Trig s
   // Generate our output carries
   for (i32 i = 0; i < NW; ++i) {
 #if CF_MUL    
-    wu[i] = carryPairMul(u[i], &carry[i], test(b, 2 * i), test(b, 2 * i + 1), 0, &carryMax, CAN_BE_INEXACT);
+    wu[i] = carryPairMul(u[i], &carry[i], test(b, 2 * i), test(b, 2 * i + 1), 0, &carryMax);
 #else
-    wu[i] = carryPair(u[i], &carry[i], test(b, 2 * i), test(b, 2 * i + 1), 0, &carryMax, CAN_BE_INEXACT);
+    wu[i] = carryPair(u[i], &carry[i], test(b, 2 * i), test(b, 2 * i + 1), 0, &carryMax);
 #endif
   }
 
@@ -3503,6 +2223,7 @@ KERNEL(64) readHwTrig(global float2* outSH, global float2* outBH, global float2*
 // Generate a small unused kernel so developers can look at how well individual macros assemble and optimize
 #ifdef TEST_KERNEL
 
+#if 0
 typedef long long i128;
 typedef unsigned long long u128;
 
@@ -3539,13 +2260,14 @@ u64 modmul(u64 a, u64 b) {
   s = addc(s, mulm1(hhm1 >> 32));
   return s;
 }
+#endif
 
 kernel void testKernel(global ulong* io) {
   uint me = get_local_id(0);
 
   ulong a = io[me];
   ulong b = io[me + 1];
-  io[me] = modmul(a, b);
+  io[me] = a + b;
 }
 
 /*
