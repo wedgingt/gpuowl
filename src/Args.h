@@ -46,15 +46,16 @@ public:
   fs::path tmpDir = ".";
   fs::path proofResultDir = "proof";
   fs::path proofToVerifyDir = "proof-tmp";
-  
+  fs::path mprimeDir = ".";
+
   bool keepProof = false;
 
   int carry = CARRY_AUTO;
-  u32 blockSize = 0;
+  u32 blockSize = 400;
   u32 logStep   = 0;
   string fftSpec;
 
-  u32 B1 = 0;
+  u32 B1 = 2'000'000;
   u32 B2 = 0;
   u32 B2_B1_ratio = 20;
   u32 D = 0;

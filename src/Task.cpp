@@ -45,15 +45,58 @@ string maybe(const string& key, const string& value) { return value.empty() ? ""
 
 template<typename T> void operator+=(vector<T>& a, const vector<T>& b) { a.insert(a.end(), b.begin(), b.end()); }
 
+constexpr int platform() {
+  /*
+  0  => 'Windows16', // 16-bit
+  1  => 'Windows',   // 32-bit
+  2  => 'Linux',     // 32-bit
+  3  => 'Solaris',   // never happened
+  4  => 'Windows64',
+  5  => 'WindowsService',
+  6  => 'FreeBSD',
+  7  => 'OS/2',
+  8  => 'Linux64',
+  9  => 'Mac OS X',
+  10 => 'Mac OS X 64-bit',
+  11 => 'Haiku',
+  12 => 'FreeBSD64',
+  */
+
+  enum {WIN_16=0, WIN_32, LINUX_32, SOLARIS, WIN_64, WIN_SERV, FREEBSD_32, OS2, LINUX_64, MACOSX_32, MACOSX_64, HAIKU, FREEBSD_64, OS_COUNT};
+  assert(OS_COUNT == 13);
+
+  const constexpr bool IS_32BIT = (sizeof(void*) == 4);
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+  return IS_32BIT ? WIN_32 : WIN_64;
+
+#elif __APPLE__
+  return IS_32BIT ? MACOSX_32 : MACOSX_64;
+
+#elif __linux__
+  return IS_32BIT ? LINUX_32 : LINUX_64;
+
+#else
+#error "Unknown OS platform"
+#endif
+
+}
+
 vector<string> commonFields(u32 E, const char *worktype, const string &status) {
-  return {json("status", status),
-          json("exponent", E),
-          json("worktype", worktype)
+  return {
+    json("status", status),
+    json("exponent", E),
+    json("worktype", worktype),
   };
 }
 
 vector<string> tailFields(const std::string &AID, const Args &args) {
-  return {json("program", vector<string>{json("name", "gpuowl"), json("version", VERSION)}),
+  assert(VERSION[0] == 'v');
+  return {json("program", vector<string>{
+                 json("name", "gpuowl"),
+                 json("version", VERSION + 1), // skip leading "v" from version
+                 json("port", platform()),
+               }),
           maybe("user", args.user),
           maybe("computer", args.cpu),
           maybe("aid", AID),
@@ -73,6 +116,12 @@ void writeResult(u32 E, const char *workType, const string &status, const std::s
 }
 
 }
+/*
+string Task::kindStr() const {
+  assert(kind == PRP || kind == PM1);
+  return kind == PRP ? "PRP" : "PM1";
+}
+*/
 
 void Task::writeResultPRP(const Args &args, bool isPrime, u64 res64, u32 fftSize, u32 nErrors, const fs::path& proofPath) const {
   vector<string> fields{json("res64", Hex{res64}),
@@ -100,18 +149,6 @@ void Task::writeResultPM1(const Args& args, const string& factor, u32 fftSize) c
   bool hasFactor = !factor.empty();
 
   u32 reportB2 = B2;
-  if (hasFactor) {
-    auto factors = factorize(factor, exponent, B1, B2);
-    if (factors.empty()) {
-      log("Error attempting to split '%s'\n", factor.c_str());
-    } else {
-      reportB2 = factors.back();
-      assert(reportB2 <= B2);
-      string fstr;
-      for (u32 f : factors) { fstr += ", "s + to_string(f); }
-      log("%s %.1f bits%s\n", factor.c_str(), log2(factor), fstr.c_str());
-    }    
-  }
 
   writeResult(exponent, "PM1", hasFactor ? "F" : "NF", AID, args,
               {json("B1", B1),
@@ -119,31 +156,6 @@ void Task::writeResultPM1(const Args& args, const string& factor, u32 fftSize) c
                json("fft-length", fftSize),
                factor.empty() ? "" : (json("factors") + ':' + "[\""s + factor + "\"]")
               });
-}
-
-void Task::adjustBounds(Args& args) {
-  if (kind == PRP && wantsPm1) {
-    if (B1 == 0 && args.B1) { B1 = args.B1; }
-    if (B2 == 0 && args.B2) { B2 = args.B2; }
-
-    if (B1 == 0) {
-      float ratio = (bitLo <= 76) ? 20 : (bitLo == 77) ? 25 : 30;
-      u32 step = 500'000;
-      B1 = u32(float(exponent) / (step * ratio) + .5f) * step;
-    }
-    
-    if (B2 == 0) { B2 = B1 * args.B2_B1_ratio; }
-
-    if (B1 < 10000) {
-      log("B1=%u too small, adjusted to %u\n", B1, 10000);
-      B1 = 10000;
-    }
-      
-    if (B2 < 2 * B1) {
-      log("B2=%u too small, adjusted to %u\n", B2, 2 * B1);
-      B2 = 2 * B1;
-    }
-  }
 }
 
 void Task::execute(const Args& args) {
@@ -157,7 +169,8 @@ void Task::execute(const Args& args) {
     return;
   }
 
-  assert(kind == PRP);
+  assert(kind == PRP || kind == PM1);
+
   auto gpu = Gpu::make(exponent, args);
   auto fftSize = gpu->getFFTSize();
 
@@ -166,8 +179,23 @@ void Task::execute(const Args& args) {
     if (factor.empty()) {
       writeResultPRP(args, isPrime, res64, fftSize, nErrors, proofPath);
     }
-    
+
     Worktodo::deleteTask(*this);
     if (!isPrime) { Saver::cleanup(exponent, args); }
+  } else { // P-1
+    LogContext p1{"P1"};
+    assert(!line.empty());  // We want to pass the same line to mprime following first-stage
+    gpu->doPm1(args, *this);
+    File::openAppend(args.mprimeDir/"worktodo.add").write(line);
+    Worktodo::deleteTask(*this);
+    /*
+    {
+      char buf[256];
+      snprintf(buf, sizeof(buf), "Pminus1=%s,1,2,%u,-1,%u,%u,%u\n",
+               AID.empty() ? "N/A" : AID.c_str(), exponent, B1, B1, howFarFactored);
+      File fo = File::openAppend(args.mprimeDir/"worktodo.add");
+      fo.write(""s + buf);
+    }
+    */
   }
 }

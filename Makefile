@@ -1,4 +1,6 @@
-CXXFLAGS = -Wall -g -O3 -std=gnu++17 -I.
+BIN=build
+CXXFLAGS = -Wall -g -O3 -std=gnu++17
+CPPFLAGS = -I$(BIN) -I.
 
 ifeq (MSWindows,$(OS))
 EXE=gpuowl-win.exe
@@ -41,11 +43,13 @@ LDFLAGS = -lstdc++fs $(LIBPATH) -lgmp -pthread
 
 LINK = $(CXX) $(CXXFLAGS)
 
-SRCS=$(wildcard *.cpp)
-OBJS = $(SRCS:%.cpp=%.$(O))
+SRCS1=$(wildcard *.cpp)
+OBJS = $(SRCS1:%.cpp=$(BIN)/%.$(O))
 OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 
-DEPDIR := .d
+DEPDIR := $(BIN)/.d
+$(shell mkdir -p $(DEPDIR) >/dev/null)
+
 DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
@@ -56,8 +60,10 @@ all: .d version.inc gpuowl-wrap.cpp $(EXE)
 gpuowl: $(OWL_OBJS) gpuowl-wrap.$(O)
 	$(LINK) $^ -o $@ $(LDFLAGS)
 
-gpuowl-cygwin.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
-	$(LINK) -static $^ -o $@ $(LDFLAGS)
+#!!wedgingt gpuowl-cygwin.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
+#!!wedgingt	$(LINK) -static $^ -o $@ $(LDFLAGS)
+$(BIN)/gpuowl: ${OBJS}
+	${LINK}
 
 gpuowl-win.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
 	$(LINK) -static $^ -o $@ $(LDFLAGS)
@@ -70,39 +76,44 @@ clean:
 	rm -f *.$(O) gpuowl gpuowl-win.exe gpuowl-wrap.cpp
 	rm -f all gpuowl-expanded.cl gpuowl-cygwin.exe D
 	rm -f version.inc install FORCE clean
-	rm -rf $(DEPDIR)
+	rm -rf $(BIN) $(DEPDIR)
 
-%.o: %.cpp $(DEPDIR)/%.d
+$(BIN)/gpuowl-wrap.o : $(BIN)/gpuowl-wrap.cpp
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $(OUTPUT_OPTION) $<
+
+$(BIN)/%.o: src/%.cpp $(DEPDIR)/%.d $(BIN)/version.inc
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	$(POSTCOMPILE)
 
-%.obj: %.cpp $(DEPDIR)/%.d
+$(BIN)/%.obj: src/%.cpp $(DEPDIR)/%.d $(BIN)/version.inc
 	$(COMPILE.cc) $(OUTPUT_OPTION) $<
 	$(POSTCOMPILE)
 
 $(DEPDIR)/%.d: %.cpp ;
-$(DEPDIR)/gpuowl-wrap.d: gpuowl-wrap.cpp ;
+.PRECIOUS: $(DEPDIR)/%.d
 
 $(DEPDIR):
 	mkdir -p $(DEPDIR)
 
-version.h: version.inc
+$(BIN)/version.h: $(BIN)/version.inc
 	touch $@
 
-version.inc: $(DEPDIR)
-	echo \"`git describe --tags --long --dirty --always`\" > version.new
-	diff -q -N version.new version.inc >/dev/null || cp version.new version.inc
-	echo Version `cat version.inc`
+$(BIN)/version.inc: FORCE
+	echo \"`git describe --tags --long --dirty --always`\" > $(BIN)/version.new
+	diff -q -N $(BIN)/version.new $(BIN)/version.inc >/dev/null || mv $(BIN)/version.new $(BIN)/version.inc
+	echo Version: `cat $(BIN)/version.inc`
 
 gpuowl-expanded.cl: gpuowl.cl tools/expand.py
 	python3 ./tools/expand.py < gpuowl.cl > gpuowl-expanded.cl
 
-gpuowl-wrap.cpp: gpuowl.cl
-	python3 tools/expand.py gpuowl.cl gpuowl-wrap.cpp
+$(BIN)/gpuowl-wrap.cpp: src/gpuowl.cl
+	python3 tools/expand.py src/gpuowl.cl $(BIN)/gpuowl-wrap.cpp
 
 install: $(EXE)
 	install -m 555 $(EXE) ../
 
 FORCE:
 
-include $(wildcard $(patsubst %,$(DEPDIR)/%.Td,$(basename $(SRCS))))
+include $(wildcard $(patsubst %,$(DEPDIR)/%.d,$(basename $(SRCS1))))
+
+# include $(wildcard $(patsubst %,$(DEPDIR)/%.d,$(basename D.cpp)))

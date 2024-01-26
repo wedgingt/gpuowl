@@ -4,13 +4,14 @@
 #include "File.h"
 #include "Blake2.h"
 #include "Args.h"
+#include "common.h"
 
 #include <filesystem>
 #include <functional>
 #include <ios>
 #include <cassert>
 #include <cinttypes>
-
+#include <string>
 
 namespace fs = std::filesystem;
 
@@ -49,7 +50,7 @@ vector<u32> Saver::listIterations(const string& prefix, const string& ext) {
 }
 
 vector<u32> Saver::listIterations() {
-  return listIterations(to_string(E) + '-', ".prp");  
+  return listIterations(to_string(E) + '-', ".prp");
 }
 
 void Saver::cleanup(u32 E, const Args& args) {
@@ -57,8 +58,6 @@ void Saver::cleanup(u32 E, const Args& args) {
     fs::path here = fs::current_path();
     fs::remove_all(here / to_string(E), noThrow());
   }
-  
-  // fs::remove_all(base, noThrow);  // redundant
 }
 
 float Saver::value(u32 k) {
@@ -69,17 +68,18 @@ float Saver::value(u32 k) {
   while (k % 2 == 0) {
     k /= 2;
     nice *= 2;
+
+    if (k % 5 == 0) {
+      k /= 5;
+      nice *= 5;
+    }
   }
-  
-  while (k % 5 == 0) {
-    k /= 5;
-    nice *= 5;
-  }
-    
+      
   return nice / float(dist);
 }
 
-Saver::Saver(u32 E, u32 nKeep, u32 b1, u32 startFrom) : E{E}, nKeep{max(nKeep, 5u)}, b1{b1} {
+Saver::Saver(u32 E, u32 nKeep, u32 startFrom, const fs::path& mprimeDir)
+  : E{E}, nKeep{max(nKeep, 5u)}, mprimeDir{mprimeDir} {
   scan(startFrom);
 }
 
@@ -111,17 +111,16 @@ void Saver::deleteBadSavefiles(u32 kBad, u32 currentK) {
 void Saver::del(u32 k) {
   // log("Note: deleting savefile %u\n", k);
   fs::remove(pathPRP(k), noThrow()); 
-  fs::remove(pathP1(k), noThrow());
 }
 
 void Saver::savedPRP(u32 k) {
   assert(k >= lastK);
-  lastK = k;
   while (minValPRP.size() >= nKeep) {
     auto kDel = minValPRP.top().second;
     minValPRP.pop();
     del(kDel);
   }
+  lastK = k;
   minValPRP.push({value(k), k});
 }
 
@@ -190,109 +189,109 @@ void Saver::savePRP(const PRPState& state) {
 
 // --- P1 ---
 
-P1State Saver::loadP1(u32 k) {
-  fs::path path = pathP1(k);
-  File fi = File::openReadThrow(path);
-  string header = fi.readLine();
-  u32 fileE, fileB1, fileK, nextK, crc;
-  if (sscanf(header.c_str(), P1_v2, &fileE, &fileB1, &fileK, &nextK, &crc) != 5) {
-    log("In file '%s': bad header '%s'\n", fi.name.c_str(), header.c_str());
-    throw "bad savefile";
-  }
-  
-  assert(fileE == E && fileB1 == b1 && fileK == k);
-  return {nextK, fi.readWithCRC<u32>(nWords(E), crc)};
-}
-
-void Saver::saveP1(u32 k, const P1State& state) {
-  auto& [nextK, data] = state;
-
-  assert(data.size() == nWords(E));
-  assert(nextK == 0 || nextK >= k);
-
-  {
-    File fo = File::openWrite(pathP1(k));
-    if (fo.printf(P1_v2, E, b1, k, nextK, crc32(data)) <= 0) {
-      throw(ios_base::failure("can't write header"));
-    }
-    fo.write(data);
-  }
-
-  loadP1(k);
-}
-
-// --- P1Final ---
-
-vector<u32> Saver::loadP1Final() {
-  fs::path path = pathP1Final();
-  File fi = File::openReadThrow(path);
-  string header = fi.readLine();
-  u32 fileE, fileB1, crc;
-  if (sscanf(header.c_str(), P1Final_v1, &fileE, &fileB1, &crc) != 3) {
-    log("In file '%s': bad header '%s'\n", fi.name.c_str(), header.c_str());
-    throw "bad savefile";
-  }
-  
-  assert(fileE == E && fileB1 == b1);
-  return fi.readWithCRC<u32>(nWords(E), crc);
-}
-
-void Saver::saveP1Final(const vector<u32>& data) {
-  assert(data.size() == nWords(E));
-  {
-    File fo = File::openWrite(pathP1Final());
-    if (fo.printf(P1Final_v1, E, b1, crc32(data)) <= 0) {
-      throw(ios_base::failure("can't write header"));
-    }
-    fo.write(data);
-  }
-
-  loadP1Final();
-}
-
-// --- P2 ---
-
-u32 Saver::loadP2(u32 b2, u32 D, u32 nBuf) {
-  fs::path path = pathP2();
-  File fi = File::openRead(path);
-  if (!fi) {
-    return 0;
-  } else {
+P1State Saver::loadP1() {
+  if (File fi = File::openRead(pathP1()); fi) {
     string header = fi.readLine();
-    u32 fileE, fileB1, fileB2, fileD, fileNBuf, nextBlock;
-
-    if (sscanf(header.c_str(), P2_v2, &fileE, &fileB1, &fileB2) == 3) {
-      assert(fileE == E && fileB1 == b1);
-      if (fileB2 >= b2) {
-        return u32(-1); // P2 finished.
-      } else {
-        log("Finish P2 with old savefile format before upgrading\n");
-        throw("P2 savefile version upgrade");
-      }
-    }
-    
-    if (sscanf(header.c_str(), P2_v3, &fileE, &fileB1, &fileB2, &fileD, &fileNBuf, &nextBlock) != 6) {
-      log("In file '%s' wrong header '%s'\n", fi.name.c_str(), header.c_str());      
+    u32 fileE, fileB1, fileK;
+    if (sscanf(header.c_str(), P1_v3, &fileE, &fileB1, &fileK) != 3) {
+      log("In file '%s': bad header '%s'\n", fi.name.c_str(), header.c_str());
       throw "bad savefile";
     }
-    assert(fileE == E && fileB1 == b1);
-    
-    if (nextBlock == u32(-1)) {
-      // if P2 already finished, don't check exact match.
-      return nextBlock;
-    }
-    
-    if (fileB2 != b2 || fileD != D || fileNBuf != nBuf) {
-      log("P2 savefile has: B2=%u, D=%u, nBuf=%u vs. B2=%u, D=%u, nBuf=%u\n", fileB2, fileD, fileNBuf, b2, D, nBuf);
-      throw("P2 savefile mismatch");
-    }
-    return nextBlock;
+
+    assert(fileE == E);
+
+    auto data  = fi.readChecked<u32>(nWords(E));
+    return {fileB1, fileK, data};
+  } else {
+    log("P1: no savefile found, starting from the beginning\n");
+    return P1State{};
   }
 }
 
-void Saver::saveP2(u32 b2, u32 D, u32 nBuf, u32 nextBlock) {
-  File fo = File::openWrite(pathP2());
-  if (fo.printf(P2_v3, E, b1, b2, D, nBuf, nextBlock) <= 0) {
-    throw(ios_base::failure("can't write header"));
+// See Prime95 source code:
+// https://www.mersenne.org/ftp_root/gimps/p95v308b15.source.zip
+// in ecm.cpp : pm1_save()
+void Saver::saveP1Prime95(const P1State& state) {
+  File fo = File::openWrite(pathP1() + ".prime95");
+
+  const u32 MAGIC = 0x317a394b;
+  const u32 VERSION = 7;
+  fo.write(MAGIC);   // 0
+  fo.write(VERSION); // 4
+
+  {
+    // K * B^E - C;
+    const double K = 1;
+    const u32 B = 2;
+    const i32 C = -1;
+    fo.write(K); // 8
+    fo.write(B); // 16
+    fo.write(E); // 20
+    fo.write(C); // 24
   }
+
+  char stage[12] = "S5";
+  fo.write(stage);   // 28
+
+  double PERCENT = 0;
+  fo.write(PERCENT); // 40
+
+  u32 sum = 0;
+  fo.write(sum);     // 48
+
+  u32 STATE_DONE = 5;
+  fo.write(STATE_DONE);
+  sum += STATE_DONE;
+
+  fo.write(u64(state.B1));
+  sum += state.B1;
+
+  fo.write(u64(state.B1));
+  sum += state.B1;
+
+  const u32 HAVE_X = 1;
+  fo.write(HAVE_X);
+  sum += HAVE_X;
+
+  auto data = state.data;
+  while (data.back() == 0) { data.pop_back(); }
+
+  u32 len = data.size();
+  fo.write(len);
+  sum += len;
+  sum += len;
+
+  fo.write(data);
+  for (u32 x : data) { sum += x; }
+
+  const u32 SUM_OFFSET = 48;
+  fo.seek(SUM_OFFSET);
+  fo.write(sum);
+}
+
+void Saver::saveP1(const P1State& state, bool isDone) {
+  assert(state.data.size() == nWords(E));
+  assert(state.B1);
+  {
+    File fo = File::openWrite(pathP1() + ".new");
+    if (fo.printf(P1_v3, E, state.B1, state.k) <= 0) {
+      throw(ios_base::failure("can't write header"));
+    }
+    fo.writeChecked(state.data);
+  }
+
+  if (isDone) {
+    saveP1Prime95(state);
+    fs::path mprimeName = mprimeDir / ("m"s + to_string(E));
+    fs::copy(pathP1() + ".prime95", mprimeName + ".new");
+    cycle(mprimeName);
+  }
+
+  cycle(pathP1());
+}
+
+void Saver::cycle(const fs::path& name) {
+  fs::remove(name + ".bak");
+  fs::rename(name, name + ".bak", noThrow());
+  fs::rename(name + ".new", name, noThrow());
 }

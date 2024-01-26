@@ -22,6 +22,11 @@
 
 namespace fs = std::filesystem;
 
+inline fs::path operator+(fs::path p, const std::string& tail) {
+  p += tail;
+  return p;
+}
+
 class File {
   FILE* f = nullptr;
   const bool readOnly;
@@ -63,6 +68,8 @@ public:
   static File openAppend(const fs::path &name) { return File{name, "ab", true}; }
   
   static void append(const fs::path& name, std::string_view text) { File::openAppend(name).write(text); }
+
+  // File() : f{} {}
 
   File(FILE* f, const string& name) : f{f}, readOnly{false}, name{name} {}
   
@@ -107,10 +114,20 @@ public:
   template<typename T>
   void write(const vector<T>& v) { write(v.data(), v.size() * sizeof(T)); }
 
+  template<typename T>
+  void write(const T& x) { write(&x, sizeof(T)); }
+
   void write(const void* data, u32 nBytes) {
     if (!fwrite(data, nBytes, 1, get())) { throw(std::ios_base::failure((name + ": can't write data").c_str())); }
   }
   
+  void seek(long offset, int whence = SEEK_SET) {
+    int ret = fseek(get(), offset, whence);
+    if (ret) {
+      throw(std::ios_base::failure(("fseek: "s + to_string(ret)).c_str()));
+    }
+  }
+
   void flush() { fflush(get()); }
   
   int printf(const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
@@ -129,11 +146,9 @@ public:
     return ret;
   }
   
-  void write(string_view s) {
-    if (fwrite(s.data(), s.size(), 1, f) != 1) {
-      throw fs::filesystem_error("can't write to file"s, name, {});
-    }
-  }
+  void write(const string& s) { write(string_view(s)); }
+  void write(const char* s) { write(string_view(s)); }
+  void write(string_view s) { write(s.data(), s.size()); }
 
   operator bool() const { return f != nullptr; }
   FILE* get() const { return f; }
@@ -144,14 +159,8 @@ public:
     return pos;
   }
 
-  void seek(long pos) {
-    int err = fseek(get(), pos, SEEK_SET);
-    assert(!err);
-  }
-
   long seekEnd() {
-    int err = fseek(get(), 0, SEEK_END);
-    assert(!err);
+    seek(0, SEEK_END);
     return ftell();
   }
   
@@ -193,10 +202,23 @@ public:
   }
 
   template<typename T>
+  std::vector<T> readChecked(u32 nWords) {
+    u32 expectedCRC = read<u32>(1)[0];
+    return readWithCRC<T>(nWords, expectedCRC);
+  }
+
+  template<typename T>
+  void writeChecked(const vector<T>& data) {
+    u32 crc = crc32(data);
+    write(&crc, sizeof(crc));
+    write(data);
+  }
+
+  template<typename T>
   std::vector<T> readWithCRC(u32 nWords, u32 crc) {
     auto data = read<T>(nWords);
     if (crc != crc32(data)) {
-      log("File '%s' : CRC found %u expected %u\n", name.c_str(), crc, crc32(data));
+      log("File '%s' : CRC: expected %u, actual %u\n", name.c_str(), crc, crc32(data));
       throw "CRC";
     }    
     return data;
