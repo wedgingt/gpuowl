@@ -44,6 +44,12 @@ struct PRPResult {
 struct Reload {
 };
 
+struct ROEInfo {
+  u32 N;
+  float max;
+  float norm;
+};
+
 class Gpu {
   friend struct SquaringSet;
   u32 E;
@@ -59,8 +65,8 @@ class Gpu {
   Holder<cl_program> program;
   QueuePtr queue;
   
-  Kernel carryFused;
-  Kernel carryFusedMul;
+  Kernel kernCarryFused;
+  Kernel kernCarryFusedMul;
   Kernel fftP;
   Kernel fftW;
   Kernel fftHin;
@@ -68,8 +74,8 @@ class Gpu {
   Kernel fftMiddleIn;
   Kernel fftMiddleOut;
   
-  Kernel carryA;
-  Kernel carryM;
+  Kernel kernCarryA;
+  Kernel kernCarryM;
   Kernel carryB;
   
   Kernel transposeW, transposeH;
@@ -103,12 +109,12 @@ class Gpu {
   HostAccessBuffer<int> bufData;   // Main int buffer with the words.
   HostAccessBuffer<int> bufAux;    // Auxiliary int buffer, used in transposing data in/out and in check.
   Buffer<int> bufCheck;  // Buffers used with the error check.
-  
+  Buffer<int> bufBase;   // used in P-1 error check.
+
   // Carry buffers, used in carry and fusedCarry.
   Buffer<i64> bufCarry;  // Carry shuttle.
   
   Buffer<int> bufReady;  // Per-group ready flag for stairway carry propagation.
-  HostAccessBuffer<u32> bufRoundoff;
   HostAccessBuffer<u32> bufCarryMax;
   HostAccessBuffer<u32> bufCarryMulMax;
 
@@ -116,10 +122,18 @@ class Gpu {
   HostAccessBuffer<int> bufSmallOut;
   HostAccessBuffer<u64> bufSumOut;
 
+  // The round-off error ("ROE"), one float element per iteration.
+  HostAccessBuffer<float> bufROE;
+
+  // The next position to write in the ROE buffer.
+  u32 roePos;
+
   // Auxilliary big buffers
   Buffer<double> buf1;
   Buffer<double> buf2;
   Buffer<double> buf3;
+  bool usesROE1;
+  bool usesROE2;
   
   vector<int> readSmall(Buffer<int>& buf, u32 start);
 
@@ -171,16 +185,17 @@ class Gpu {
   
   u32 maxBuffers();
 
-  template<typename Pm1Plan>
-  void doP2(Saver* saver, u32 b1, u32 b2, future<string>& gcdFuture, Signal& signal);
-
-  void doP2(Saver* saver, u32 b1, u32 b2, future<string>& gcdFuture, Signal& signal);
-  bool verifyP2Checksums(const vector<Buffer<double>>& bufs, const vector<u64>& sums);
-  bool verifyP2Block(u32 D, const Words& p1Data, u32 block, const Buffer<double>& bigC, Buffer<int>& bufP2Data);
   fs::path saveProof(const Args& args, const ProofSet& proofSet);
+  ROEInfo readROE();
   
 public:
   const Args& args;
+
+  // void carryA(Buffer<int>& a, Buffer<double>& b) { kernCarryA(roe2Pos++, a, b); }
+  template<typename... Args> void carryA(const Args &...args) { kernCarryA(usesROE2 ? roePos++ : roePos, args...); }
+  void carryM(Buffer<int>& a, Buffer<double>& b) { kernCarryM(usesROE2 ? roePos++ : roePos, a, b); }
+  void carryFused(Buffer<double>& a, Buffer<double>& b) { kernCarryFused(usesROE1 ? roePos++ : roePos, a, b); }
+  void carryFusedMul(Buffer<double>& a, Buffer<double>& b) { kernCarryFusedMul(usesROE1 ? roePos++ : roePos, a, b); }
 
   Words fold(vector<Buffer<int>>& bufs);
   
@@ -218,6 +233,19 @@ public:
   vector<u32> readData();
 
   PRPResult isPrimePRP(const Args& args, const Task& task);
+
+  void pm1Block(vector<bool> bits, bool update);
+  bool pm1Check(vector<bool> sumBits, u32 blockSize);
+
+  void doPm1(const Args& args, const Task& task) {
+    u32 nErr = 0;
+    while (pm1Retry(args, task, nErr++)) {
+      if (nErr > 30) { throw "too many errors"; }
+    }
+  }
+
+  // return true to be invoked again (for retry)
+  bool pm1Retry(const Args& args, const Task& task, u32 nErr);
 
   // std::variant<string, vector<u32>> factorPM1(u32 E, const Args& args, u32 B1, u32 B2);
   

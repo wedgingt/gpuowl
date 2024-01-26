@@ -11,6 +11,7 @@
 D
 \#*\#
 __pycache__
+__pycache__
 all
 build/
 cmake-build-*/
@@ -22,6 +23,7 @@ gpuowl
 gpuowl-expanded.cl
 gpuowl.exe
 gpuowl.log
+meson.build.user
 pm1/pm1
 proof
 tmp/

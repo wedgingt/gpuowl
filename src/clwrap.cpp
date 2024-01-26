@@ -11,6 +11,7 @@
 #include <new>
 #include <memory>
 #include <vector>
+#include <array>
 
 using namespace std;
 
@@ -239,7 +240,7 @@ static void build(cl_program program, cl_device_id device, string args) {
     log("%s\n", buf.get());
   }
   if (ok) {
-    log("OpenCL compilation in %.2f s\n", timer.deltaSecs());
+    log("OpenCL compilation in %.2f s\n", timer.reset());
   } else {
     release(program);
     CHECK2(err, "clBuildProgram");

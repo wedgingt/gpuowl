@@ -30,8 +30,13 @@ jobs:
       run: |
         echo '+ make -j '"$(nproc)"
         make -j "$(nproc)"
-        echo '+ ./gpuowl -h'
-        ./gpuowl -h
+        echo '+ ./build/gpuowl -h'
+        ./build/gpuowl -h
+    - uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: ${{ matrix.os }}_${{ matrix.cxx }}_gpuowl
+        path: ${{ github.workspace }}
     - name: Cppcheck
       run: cppcheck --enable=all --force .
     - name: ShellCheck
