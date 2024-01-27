@@ -43,8 +43,8 @@ LDFLAGS = -lstdc++fs $(LIBPATH) -lgmp -pthread
 
 LINK = $(CXX) $(CXXFLAGS)
 
-SRCS1=$(wildcard *.cpp)
-OBJS = $(SRCS1:%.cpp=$(BIN)/%.$(O))
+SRCS1=$(wildcard $(BIN)/*.cpp src/*.cpp)
+OBJS = $(SRCS1:%.cpp=%.$(O))
 OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
 
 DEPDIR := $(BIN)/.d
@@ -54,10 +54,10 @@ DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
 POSTCOMPILE = @mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
 
-all: .d version.inc gpuowl-wrap.cpp $(EXE)
+all: .d $(BIN)/version.inc $(BIN)/gpuowl-wrap.cpp $(EXE)
 	echo $@ > $@
 
-gpuowl: $(OWL_OBJS) gpuowl-wrap.$(O)
+gpuowl: $(OWL_OBJS) $(BIN)/gpuowl-wrap.$(O)
 	$(LINK) $^ -o $@ $(LDFLAGS)
 
 #!!wedgingt gpuowl-cygwin.exe: $(OWL_OBJS) gpuowl-wrap.$(O)
@@ -75,7 +75,7 @@ D:	D.$(O) Pm1Plan.$(O) log.$(O) common.$(O) timeutil.$(O)
 clean:
 	rm -f *.$(O) gpuowl gpuowl-win.exe gpuowl-wrap.cpp
 	rm -f all gpuowl-expanded.cl gpuowl-cygwin.exe D
-	rm -f version.inc install FORCE clean
+	rm -f $(BIN)/version.inc install FORCE clean
 	rm -rf $(BIN) $(DEPDIR)
 
 $(BIN)/gpuowl-wrap.o : $(BIN)/gpuowl-wrap.cpp
