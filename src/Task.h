@@ -14,7 +14,7 @@ class Result;
 class Background;
 
 struct Task {
-  enum Kind {PRP, VERIFY, PM1};
+  enum Kind {PRP, VERIFY, PM1, LL};
 
   Kind kind;
   u32 exponent;
