@@ -43,12 +43,13 @@ LDFLAGS = -lstdc++fs $(LIBPATH) -lgmp -pthread
 
 LINK = $(CXX) $(CXXFLAGS)
 
-SRCS1=$(wildcard $(BIN)/*.cpp src/*.cpp)
+SRCS=$(wildcard $(BIN)/*.cpp src/*.cpp)
+SRCS1=$(filter-out src/sine_compare.cpp src/qdcheb.cpp,$(SRCS))
 OBJS = $(SRCS1:%.cpp=%.$(O))
-OWL_OBJS=$(filter-out D.$(O) sine_compare.$(O) qdcheb.$(O),$(OBJS))
+OWL_OBJS=$(filter-out D.$(O) $(BIN)/sine_compare.$(O) $(BIN)/qdcheb.$(O),$(OBJS))
 
-DEPDIR := $(BIN)/.d
-$(shell mkdir -p $(DEPDIR) >/dev/null)
+DEPDIR := .d
+$(shell mkdir -p $(DEPDIR)/src >/dev/null)
 
 DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 COMPILE.cc = $(CXX) $(DEPFLAGS) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c
